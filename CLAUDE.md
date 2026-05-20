@@ -54,6 +54,10 @@ schema.sql              # one-shot Supabase DDL (idempotent)
 4. Add the field to the payload dict in the matching `commands/*.py` function (insert path *and* the conditional update path).
 5. If the README's command examples reference the new field, update them too.
 
+## Keep the README in sync
+
+After any significant change — new command, new field, changed flag, changed validation rule, changed install/config flow, or anything else that alters user-facing behavior — update [`README.md`](./README.md) in the same change. The README is the user-facing source of truth; if it drifts, users get wrong instructions. Trivial refactors and internal-only changes don't require a README update.
+
 ## What NOT to add
 
 - No ORM, no repository pattern — the codebase is small enough that direct `client().table()` calls win on readability.
