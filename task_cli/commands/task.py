@@ -1,6 +1,6 @@
 import sys
 
-from ..api import TaskCLI, TaskCLIError
+from task_program import TaskCLI, TaskCLIError
 
 
 def _format(row: dict) -> str:

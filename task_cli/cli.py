@@ -1,9 +1,10 @@
 import argparse
 from datetime import date
 
+from task_program.models import Status
+
 from .commands import project as project_cmd
 from .commands import task as task_cmd
-from .models import Status
 
 
 STATUS_CHOICES = [s.value for s in Status]
@@ -91,7 +92,7 @@ def _build_task_parser(sub: argparse._SubParsersAction) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="taskcli",
+        prog="task",
         description="Manage projects and tasks backed by Supabase",
     )
     sub = parser.add_subparsers(dest="entity", required=True)

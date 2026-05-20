@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "taskcli"
+name = "task"
 version = "0.1.0"
-description = "CLI + library for managing projects and tasks backed by Supabase"
+description = "CLI + MCP clients over a shared task_program execution layer, backed by Supabase"
 requires-python = ">=3.10"
 dependencies = [
   "supabase>=2.0",
@@ -16,7 +16,7 @@ dependencies = [
 mcp = ["mcp[cli]>=1.0"]
 
 [project.scripts]
-taskcli = "taskcli.cli:main"
+task = "task_cli.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["taskcli*", "taskcli_mcp*"]
+include = ["task_program*", "task_cli*", "task_mcp*"]

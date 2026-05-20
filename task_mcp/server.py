@@ -1,6 +1,6 @@
 """MCP server exposing the TaskCLI class as tools for Claude Desktop.
 
-Launch with: ``python -m taskcli_mcp``
+Launch with: ``python -m task_mcp``
 """
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ from typing import Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from taskcli import TaskCLI, TaskCLIError
+from task_program import TaskCLI, TaskCLIError
 
 
 StatusLiteral = Literal["todo", "in_progress", "done"]
 
 
-mcp = FastMCP("taskcli")
+mcp = FastMCP("task")
 
 _api_singleton: Optional[TaskCLI] = None
 
