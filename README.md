@@ -1,501 +1,116 @@
 # task
 
-A command-line tool, MCP server, and Python library for managing **Projects** and the **Tasks** that belong to them, persisted in a Supabase Postgres database.
+A CLI + MCP server for managing **Projects** and the **Tasks** that belong to them, backed by Supabase Postgres.
 
 ---
 
-## Part 1 — How the system works
-
-### 1.1 High-level architecture
+## 1. Project overview
 
 The repo is split into one execution layer and two clients that wrap it:
 
-1. **Execution layer** (`task_program/`) — owns all validation and Supabase calls. `task_program/api.py` defines the `TaskCLI` class; `task_program/db.py` builds an `lru_cache`d Supabase client; `task_program/models.py` defines the `Status` enum and dataclasses. No CLI or MCP code lives here.
-2. **CLI client** (`task_cli/`) — an argparse dispatcher (`task_cli/cli.py` + `task_cli/commands/*.py`) that turns shell invocations like `task project add ...` into `TaskCLI` method calls. Adapters catch `TaskCLIError` and translate it into `sys.exit(message)` so the user sees a clean one-line error with no traceback.
-3. **MCP client** (`task_mcp/`) — a FastMCP server that registers one MCP tool per `TaskCLI` method. Errors are returned as plain strings prefixed `Error:`.
+- **`task_program/`** — execution layer. `TaskCLI` class + Supabase access. No CLI or MCP code.
+- **`task_cli/`** — CLI client. Imports `TaskCLI` from `task_program`.
+- **`task_mcp/`** — MCP server client. Imports `TaskCLI` from `task_program`.
 
-Both clients import `TaskCLI` from `task_program` — they are peers. Adding a new client (web service, alternative MCP server, scripts) means a new sibling package, not changes to `task_program`.
+`task_cli` and `task_mcp` are peers; adding another consumer (web service, scripts) means a new sibling package, not changes to `task_program`.
 
 ```mermaid
 flowchart LR
-    shell["shell / pipx<br/><code>task ...</code>"] --> cli["task_cli/cli.py<br/>(argparse dispatch)"]
-    cli --> adapters["task_cli/commands/*.py<br/>(format + sys.exit on error)"]
-
-    claude["Claude Desktop"] -- MCP/stdio --> mcp["task_mcp/server.py<br/>(FastMCP tools)"]
-
-    other["other Python code<br/><code>from task_program import TaskCLI</code>"] --> api
-
-    adapters --> api["task_program/api.py<br/><b>TaskCLI</b> class<br/>(validation + CRUD)"]
+    shell["shell<br/><code>task ...</code>"] --> cli["task_cli"]
+    claude["Claude Desktop"] -- MCP/stdio --> mcp["task_mcp"]
+    other["other Python"] --> api
+    cli --> api["task_program<br/><b>TaskCLI</b>"]
     mcp --> api
-
-    api --> db["task_program/db.py<br/>(cached Supabase client)"]
-    db --> supabase[("Supabase<br/>Postgres")]
-
-    api -. raises .-> err["TaskCLIError"]
-    err -. caught by .-> adapters
-    err -. caught by .-> mcp
+    api --> supabase[("Supabase Postgres")]
 ```
 
-Both `task_cli` and `task_mcp` are thin clients over the same `TaskCLI` execution layer; they differ only in how they translate `TaskCLIError`. The CLI calls `sys.exit(str(e))` (one clean line, no traceback). The MCP server returns `f"Error: {e}"` so Claude sees a structured string instead of a crash.
+**Data model** — two tables (`projects`, `tasks`) and one `task_status` enum (`todo` / `in_progress` / `done`). Full DDL in [`schema.sql`](./schema.sql) — idempotent, paste into the Supabase SQL editor.
 
-### 1.2 Data model
+**Credentials** — copy `.env.example` to `.env` and fill in `SUPABASE_URL` and `SUPABASE_KEY`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat).
 
-Two tables, one enum. The full DDL lives in [`schema.sql`](./schema.sql).
-
-**`projects`**
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | serial PK | auto |
-| `title` | text | required |
-| `description` | text | required, may be empty string |
-| `start_date` | date | required |
-| `end_date` | date | must be `>= start_date` (enforced in the API layer) |
-| `no_of_stages` | int | number of phases the project moves through; must be `>= 1` |
-
-**`tasks`**
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | serial PK | auto |
-| `project_id` | int FK → `projects.id` | `ON DELETE CASCADE` — deleting a project deletes its tasks |
-| `title`, `description` | text | required (description may be empty) |
-| `status` | `task_status` enum | one of `todo`, `in_progress`, `done` |
-| `assigned_to` | text | free-form, may be empty |
-| `stage` | int | must be in `1..projects.no_of_stages` (enforced in the API layer, not in SQL) |
-| `start_date`, `end_date` | date | `end_date >= start_date` |
-
-The `task_status` Postgres enum mirrors the `Status` enum in `task_program/models.py`.
-
- They must stay in sync — adding a status requires both a SQL migration and a Python enum change.
-
-### 1.3 Dispatch flow (CLI)
-
-`task_cli/cli.py` builds two layers of argparse subparsers: **entity** (`project` | `task`) → **verb** (`add` | `list` | `show` | `update` | `delete`). Each verb subparser sets `func=<command_function>` as a default. `main()` parses argv and then simply calls `args.func(args)`.
-
-Each command function in `task_cli/commands/project.py` and `task_cli/commands/task.py` does three things:
-
-1. Reads the relevant attributes off `args` (e.g. `args.title`, `args.start`).
-2. Calls the matching `TaskCLI` method inside a `try` block.
-3. On `TaskCLIError`, calls `sys.exit(str(e))`. On success, prints a one-line confirmation (`[+] Created project #5: Launch v1`) or, for `list`/`show`, the formatted rows.
-
-Formatting helpers (`_format`) live in the command modules because formatting is a CLI-only concern. The API layer returns raw dicts.
-
-### 1.4 The `TaskCLI` class
-
-`task_program/api.py` defines:
-
-- `TaskCLIError(Exception)` — raised on any validation or not-found failure. Programmatic callers catch this.
-- `TaskCLI` — one method per CLI verb:
-  - `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
-  - `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`
-
-Methods return raw row dicts (or `list[dict]` for the list variants). Date arguments accept either `datetime.date` or ISO strings (`"2026-06-01"`); the API normalizes both with `date.fromisoformat`. `status` is a plain string matching one of the enum values.
-
-The constructor optionally accepts `supabase_url` / `supabase_key` overrides. When omitted, it falls back to the shared cached `client()` from `task_program/db.py`, which means the same `.env` discovery rules apply to both CLI and library callers.
-
-### 1.5 Validation, error handling, and where it lives
-
-All cross-cutting validation is centralized in `TaskCLI`:
-
-| Check | Triggered by | Error message |
-|---|---|---|
-| `end_date >= start_date` | every add/update with both dates | `"end date must be on or after start date"` |
-| `stages >= 1` | project add/update | `"--stages must be >= 1"` |
-| `1 <= stage <= no_of_stages` | task add/update with `stage` | `"Stage must be 1..N for project #M"` |
-| Project exists | task add, task update changing stage, project show/update/delete | `"Project #N not found"` |
-| Task exists | task show/update/delete | `"Task #N not found"` |
-| At least one update field | project/task update | `"Nothing to update. Provide at least one field."` |
-| Credentials present | first Supabase call | `"SUPABASE_URL and SUPABASE_KEY must be set (see .env.example)"` |
-
-The API raises `TaskCLIError` for all of these. The CLI adapters catch it and `sys.exit` with the same string, so users see one clean line — no traceback. The stage upper bound is enforced in code rather than SQL because a Postgres `CHECK` can't reference another table without a trigger and the in-code message is friendlier.
-
-### 1.6 `.env` discovery and credentials
-
-`task_program/db.py` looks for `.env` in two places:
-
-1. **Walk up from cwd** via `find_dotenv(usecwd=True)`. This is what makes `task` work anywhere inside the project tree.
-2. **Fallback to `~/.config/taskcli/.env`** if no `.env` is found by walking up. This is what makes `task` work from unrelated directories (e.g. your home folder). (The fallback path keeps the legacy `taskcli` folder name so existing configs keep working — see `task_program/db.py`.)
-
-Either the anon key or the service role key works. RLS is disabled on both tables in `schema.sql` because this is a single-user local tool — if you re-enable RLS, you'll need policies or you'll get `42501 row-level security` errors.
-
-### 1.7 What `task` deliberately does *not* do
-
-- No ORM, no repository pattern — `client().table("...").<op>().execute()` is called directly. The codebase is small enough that this wins on readability.
-- No interactive prompts — every command is scriptable.
-- No colored or tabular output — stdout is plain text so it pipes cleanly.
-- No offline mode or local cache — Supabase is the single source of truth.
-
-### 1.8 Repository layout
-
-```
-task_program/           # execution layer. Library only — no CLI, no MCP.
-├── __init__.py         #   exports TaskCLI, TaskCLIError
-├── api.py              #   TaskCLI class + TaskCLIError (business logic + Supabase calls)
-├── db.py               #   cached Supabase client; loads .env
-└── models.py           #   Project, Task dataclasses + Status enum
-
-task_cli/               # CLI client. Imports TaskCLI from task_program.
-├── __init__.py
-├── __main__.py         #   `python -m task_cli` entry point
-├── cli.py              #   argparse: entity → verb → args.func dispatch
-└── commands/
-    ├── project.py      #   CLI adapters for project verbs (formatting + sys.exit)
-    └── task.py         #   CLI adapters for task verbs
-
-task_mcp/               # MCP client. Imports TaskCLI from task_program. Optional `[mcp]` extra.
-├── __init__.py
-├── __main__.py         #   `python -m task_mcp` entry point
-└── server.py           #   FastMCP server registering one tool per TaskCLI method
-
-schema.sql              # idempotent Postgres DDL
-pyproject.toml          # build config; `[project.optional-dependencies].mcp` pulls in mcp[cli]
-.env.example            # credentials template
-```
-
-`task_program` is the execution layer. `task_cli` and `task_mcp` are peer clients. Adding another consumer (web service, alternative MCP variant, scripts) means a new sibling package — `task_program` stays slim and dependency-free of any client concerns.
+**Setup** — see [`SETUP.md`](./SETUP.md) for step-by-step install instructions (one track for the CLI, one for the MCP server).
 
 ---
 
-## Part 2 — How to use it
+## 2. Execution layer (`task_program/`)
 
-### 2.1 Prerequisites
+`task_program/api.py` defines:
 
-- Python 3.10+
-- [pipx](https://pipx.pypa.io/stable/) — `python -m pip install --user pipx && python -m pipx ensurepath`
-- A Supabase project (free tier is fine) and its URL + an API key
+- `TaskCLIError(Exception)` — raised on validation or not-found failures.
+- `TaskCLI` — one method per CRUD verb:
+  - Projects: `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
+  - Tasks: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`
 
-### 2.2 Install
+All methods return raw row dicts (or `list[dict]`). Date arguments accept either `datetime.date` or ISO strings (`"2026-06-01"`). `status` is a plain string matching the enum.
+
+Validation centralized in `TaskCLI`: `end_date >= start_date`, `stages >= 1`, `1 <= stage <= project.no_of_stages`, project/task existence on lookups, and "at least one field" on updates. The stage upper bound is enforced in code rather than SQL because Postgres `CHECK` can't reference another table without a trigger.
+
+```python
+from task_program import TaskCLI, TaskCLIError
+
+api = TaskCLI()  # or TaskCLI(supabase_url=..., supabase_key=...)
+
+p = api.add_project(title="Launch v1", description="Q3", start="2026-06-01",
+                    end="2026-09-30", stages=4)
+t = api.add_task(project=p["id"], title="Wireframes", description="",
+                 status="todo", assigned_to="Aarav", stage=1,
+                 start="2026-06-01", end="2026-06-15")
+api.update_task(t["id"], status="in_progress")
+
+try:
+    api.get_project(999)
+except TaskCLIError as e:
+    print(e)  # "Project #999 not found"
+```
+
+Supabase client is `lru_cache`d in `task_program/db.py` — built once per process. No ORM, no repository layer.
+
+---
+
+## 3. CLI tool (`task_cli/`)
+
+The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `project|task` → `add|list|show|update|delete`.
 
 ```bash
-git clone <this-repo>
-cd task-mcp-cli-tool
-pipx install .
-```
-
-`pipx` puts a `task` executable on your PATH that you can run from any directory.
-
-For active development, install editable so source edits take effect without reinstalling:
-
-```bash
-pipx install --editable .
-# or, without pipx:
-pip install -e .
-python -m task_cli --help
-```
-
-### 2.3 One-time setup
-
-**Step 1 — create the schema.** Open the **SQL Editor** in your Supabase dashboard and paste the contents of [`schema.sql`](./schema.sql). It's idempotent, so re-running is safe.
-
-**Step 2 — provide credentials.** Copy the template:
-
-```bash
-cp .env.example .env
-```
-
-Fill in real values:
-
-```dotenv
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-anon-or-service-role-key
-```
-
-- The **anon key** works if RLS is off (the default for new tables and what `schema.sql` sets).
-- Use the **service role key** if you've turned RLS on without writing policies.
-
-**Step 3 (optional) — make it work from anywhere.** The CLI walks up parent directories from cwd to find `.env`. To also make it work outside the project tree (e.g. from `C:\` or your home folder), copy `.env` to `~/.config/taskcli/.env`:
-
-```powershell
-# Windows PowerShell
-New-Item -ItemType Directory -Force "$HOME\.config\taskcli" | Out-Null
-Copy-Item .env "$HOME\.config\taskcli\.env"
-```
-
-```bash
-# macOS / Linux
-mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
-```
-
-### 2.4 CLI — project commands
-
-```bash
-# Create
-task project add \
-  --title "Launch v1" \
-  --description "Q3 release" \
-  --start 2026-06-01 \
-  --end 2026-09-30 \
-  --stages 4
-
-# List all
+# projects
+task project add --title "Launch v1" --description "Q3" \
+                 --start 2026-06-01 --end 2026-09-30 --stages 4
 task project list
-
-# Show one
 task project show 1
-
-# Update (every field optional; pass only what changes)
 task project update 1 --description "Pushed to Q4" --end 2026-12-15
+task project delete 1                                    # cascades to tasks
 
-# Delete (cascades to all tasks in this project)
-task project delete 1
-```
-
-**Required flags for `project add`:** `--title`, `--start`, `--end`, `--stages`. `--description` defaults to `""`.
-
-### 2.5 CLI — task commands
-
-```bash
-# Create
-task task add \
-  --project 1 \
-  --title "Wireframes" \
-  --description "First-pass mockups" \
-  --status todo \
-  --assigned-to "Aarav" \
-  --stage 1 \
-  --start 2026-06-01 \
-  --end 2026-06-15
-
-# List
-task task list                          # all tasks
-task task list --project 1              # only tasks in project 1
-task task list --status in_progress     # filter by status
-task task list --project 1 --status done
-
-# Show one
+# tasks
+task task add --project 1 --title "Wireframes" --description "" \
+              --status todo --assigned-to "Aarav" --stage 1 \
+              --start 2026-06-01 --end 2026-06-15
+task task list                                           # all
+task task list --project 1 --status in_progress          # filter
 task task show 1
-
-# Update
 task task update 1 --status in_progress --assigned-to "Sam"
-
-# Delete
 task task delete 1
 ```
 
-**Required flags for `task add`:** `--project`, `--title`, `--stage`, `--start`, `--end`. `--description` defaults to `""`, `--status` defaults to `todo`, `--assigned-to` defaults to `""`.
+**Required flags** — `project add`: `--title --start --end --stages`. `task add`: `--project --title --stage --start --end`. Everything else has a default.
 
-### 2.6 Validation behavior
-
-The CLI rejects bad input with a clean one-line message — no Python tracebacks:
+**Errors** print as one clean line, no traceback (`task_cli/commands/*.py` catches `TaskCLIError` and calls `sys.exit(str(e))`):
 
 | Input | Result |
 |---|---|
 | `--end` before `--start` | `end date must be on or after start date` |
-| `--stages 0` | `--stages must be >= 1` |
 | `--stage 99` on a 4-stage project | `Stage must be 1..4 for project #N` |
 | `--project 999` (nonexistent) | `Project #999 not found` |
 | `update` with no fields | `Nothing to update. Provide at least one field.` |
-| `--status weird` | argparse rejects with the allowed choices |
-| Missing `SUPABASE_URL` / `SUPABASE_KEY` | `SUPABASE_URL and SUPABASE_KEY must be set (see .env.example)` |
-
-### 2.7 Library use — `TaskCLI` from Python
-
-Other Python programs can import `TaskCLI` directly instead of shelling out. Credentials use the same `.env` discovery as the CLI.
-
-```python
-from datetime import date
-from task_program import TaskCLI, TaskCLIError
-
-api = TaskCLI()
-# or explicit: TaskCLI(supabase_url="...", supabase_key="...")
-
-# Create a project
-project = api.add_project(
-    title="Launch v1",
-    description="Q3 release",
-    start=date(2026, 6, 1),
-    end=date(2026, 9, 30),
-    stages=4,
-)
-print(project["id"], project["title"])
-
-# Create a task — dates accept date objects or ISO strings
-task = api.add_task(
-    project=project["id"],
-    title="Wireframes",
-    description="First-pass mockups",
-    status="todo",
-    assigned_to="Aarav",
-    stage=1,
-    start="2026-06-01",
-    end="2026-06-15",
-)
-
-# List + filter
-for t in api.list_tasks(project=project["id"], status="todo"):
-    print(t["title"], t["status"])
-
-# Update (keyword-only optional fields)
-api.update_task(task["id"], status="in_progress", assigned_to="Sam")
-
-# Lookup by id
-print(api.get_project(project["id"]))
-print(api.get_task(task["id"]))
-
-# Delete
-api.delete_task(task["id"])
-api.delete_project(project["id"])
-
-# Errors raise TaskCLIError instead of exiting
-try:
-    api.add_task(
-        project=999, title="x", description="",
-        status="todo", assigned_to="",
-        stage=1, start="2026-01-01", end="2026-01-02",
-    )
-except TaskCLIError as e:
-    print("rejected:", e)
-```
-
-**Method summary:**
-
-```python
-# Projects
-api.add_project(title, description, start, end, stages) -> dict
-api.list_projects() -> list[dict]
-api.get_project(id) -> dict
-api.update_project(id, *, title=None, description=None,
-                   start=None, end=None, stages=None) -> dict
-api.delete_project(id) -> None
-
-# Tasks
-api.add_task(project, title, description, status, assigned_to,
-             stage, start, end) -> dict
-api.list_tasks(project=None, status=None) -> list[dict]
-api.get_task(id) -> dict
-api.update_task(id, *, title=None, description=None, status=None,
-                assigned_to=None, stage=None, start=None, end=None) -> dict
-api.delete_task(id) -> None
-```
-
-All methods return raw row dicts (or `list[dict]`) and raise `TaskCLIError` on the same conditions the CLI exits on. `status` is the string value (`"todo"`, `"in_progress"`, `"done"`). Date arguments accept either `datetime.date` or ISO `"YYYY-MM-DD"` strings.
-
-### 2.8 Troubleshooting (CLI / library)
-
-- **`SUPABASE_URL and SUPABASE_KEY must be set`** — no `.env` was found walking up from cwd and `~/.config/taskcli/.env` doesn't exist either. Create one of the two.
-- **`42501 row-level security`** — RLS got turned on in Supabase without policies. Either turn it off for `projects`/`tasks` or use the service role key.
-- **Edits don't take effect after `pipx install .`** — that snapshots the source. Reinstall with `pipx install --force --editable .` (or use `--editable` from the start).
+| Missing creds | `SUPABASE_URL and SUPABASE_KEY must be set` |
 
 ---
 
-## Part 3 — Claude Desktop MCP server setup
+## 4. MCP server (`task_mcp/`)
 
-The sibling package `task_mcp` ships an MCP (Model Context Protocol) server that consumes the `task_program` execution layer and exposes every `TaskCLI` method as a tool Claude Desktop can call. `task_mcp` lives alongside `task_cli` in this repo but is its own package — `task_program` itself has no MCP dependency, so other consumers (web UIs, scripts, future MCP variants) can import it cleanly.
+`task_mcp/server.py` registers one MCP tool per `TaskCLI` method, with the same names as the methods (`add_project`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
 
-Once configured, you can say things like *"list my projects"* or *"create a task in project 3 called Wireframes"* and Claude will invoke the right tool.
+Tools exposed: `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`, `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`. Dates are ISO strings (`"YYYY-MM-DD"`); `status` is `"todo"`, `"in_progress"`, or `"done"`.
 
-### 3.1 Tools exposed
+Once configured in Claude Desktop, plain-English requests like *"list my projects"* or *"create a task in project 3 called Wireframes"* are routed to the matching tool.
 
-The server registers one MCP tool per `TaskCLI` method:
-
-`add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`, `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`.
-
-Dates are passed as ISO strings (`"YYYY-MM-DD"`). `status` is one of `"todo"`, `"in_progress"`, `"done"`. Validation and not-found errors come back as plain strings prefixed with `Error:` (no tracebacks).
-
-### 3.2 Step 1 — install with the `mcp` extra
-
-The MCP SDK is an **optional extra** since `task_program` itself doesn't depend on it. Install with the `[mcp]` extra to pull it in:
-
-```bash
-pipx install --force --editable ".[mcp]"
-# or, in a venv:
-pip install -e ".[mcp]"
-```
-
-A plain `pip install -e .` installs only the library and CLI; the MCP server won't run without the extra.
-
-### 3.3 Step 2 — locate your Python interpreter
-
-Claude Desktop needs the **absolute path** to the Python that has the `task` distribution installed.
-
-- **Windows + pipx:** `C:\Users\<you>\pipx\venvs\task\Scripts\python.exe`
-  `pipx environment --value PIPX_LOCAL_VENVS` prints the **parent directory** (e.g. `C:\Users\<you>\pipx\venvs`) — append `\task\Scripts\python.exe` to get the actual interpreter.
-- **macOS / Linux + pipx:** `~/.local/pipx/venvs/task/bin/python`
-- **venv install:** the `python` (or `python.exe`) inside your venv's `bin`/`Scripts` folder. Find it with `(Get-Command python).Source` (PowerShell) or `which python` (bash).
-
-Verify the path works. In **PowerShell**, executing a quoted path requires the call operator `&` — otherwise PowerShell parses the string as an expression and rejects the trailing arguments:
-
-```powershell
-# PowerShell — use & to invoke a quoted path
-& "C:\Users\<you>\pipx\venvs\task\Scripts\python.exe" -m task_mcp
-```
-
-```bash
-# bash / zsh
-"<that python path>" -m task_mcp
-```
-
-The server should start silently and block waiting for stdin (MCP servers communicate over stdio and print nothing to the console on startup). Press Ctrl+C to exit. If you see `ModuleNotFoundError`, you have the wrong interpreter — try again.
-
-### 3.4 Step 3 — put credentials where the server can find them
-
-Claude Desktop launches the MCP server with an **undefined working directory**, so the cwd-walking `.env` discovery used by the CLI is unreliable here. Put a copy of your `.env` at the user-home fallback location:
-
-```powershell
-# Windows PowerShell
-New-Item -ItemType Directory -Force "$HOME\.config\taskcli" | Out-Null
-Copy-Item .env "$HOME\.config\taskcli\.env"
-```
-
-```bash
-# macOS / Linux
-mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
-```
-
-### 3.5 Step 4 — edit `claude_desktop_config.json`
-
-The config file lives at:
-
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Open it (create it if missing) and add a `task` entry under `mcpServers`. Replace the `command` value with the Python path from Step 2. **Use double backslashes** in JSON strings on Windows.
-
-```json
-{
-  "mcpServers": {
-    "task": {
-      "command": "C:\\Users\\<you>\\pipx\\venvs\\task\\Scripts\\python.exe",
-      "args": ["-m", "task_mcp"]
-    }
-  }
-}
-```
-
-If you already have other entries under `mcpServers`, merge — don't replace.
-
-### 3.6 Step 5 — restart Claude Desktop and verify
-
-Fully quit Claude Desktop (tray icon → Quit on Windows, ⌘Q on macOS — not just close the window) and relaunch. In a new chat, click the tools icon (🔌 / hammer); you should see ten tools (`add_project`, `list_projects`, `add_task`, etc.) registered under the `task` server.
-
-Smoke tests:
-
-- *"List my projects."* → Claude calls `list_projects` and renders the result.
-- *"Create a project titled 'Test' from 2026-06-01 to 2026-09-30 with 4 stages, blank description."* → Claude calls `add_project` and reports the new id.
-- *"Show project 999999."* → Claude reports back `Error: Project #999999 not found` — no traceback.
-
-### 3.7 Troubleshooting (MCP)
-
-- **Tools don't appear after restart.** Check Claude Desktop's MCP logs:
-  - Windows: `%APPDATA%\Claude\logs\mcp-server-task.log`
-  - macOS: `~/Library/Logs/Claude/mcp-server-task.log`
-- **`ModuleNotFoundError: No module named 'task_program'`** (or `task_mcp`) in the log — the `command` is pointing at the wrong Python. Redo Step 2 and Step 3.
-- **`SUPABASE_URL and SUPABASE_KEY must be set`** in the log — the server couldn't find a `.env`. Put one at `~/.config/taskcli/.env` (Step 4).
-- **Server crashes silently on launch.** Run `python -m task_mcp` manually in a terminal using the exact Python from your config — any stack trace prints there.
-- **Tools work but data looks stale.** The CLI and MCP server hit the same Supabase tables; refresh the chat or re-call `list_*` to pull current state.
-- **`pipx install --force --editable ".[mcp]"` fails with `A virtual environment already exists ... Use --clear to replace it`.** This is a pipx + uv interaction bug — `--force` doesn't pass `--clear` through to uv's venv builder. Uninstall first, then reinstall cleanly:
-  ```powershell
-  pipx uninstall task
-  pipx install --editable ".[mcp]"
-  ```
-
-### 3.8 Optional — interactive inspector during development
-
-`mcp[cli]` ships with a local inspector that lets you call tools manually without going through Claude Desktop:
-
-```bash
-mcp dev task_mcp/server.py
-```
-
-It opens a browser UI showing all registered tools, their schemas, and a form to invoke each one. Useful when iterating on the server code.
+**Setup** — see [`SETUP.md`](./SETUP.md) Track B for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
