@@ -5,15 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "taskcli"
 version = "0.1.0"
-description = "CLI for managing projects and tasks backed by Supabase"
+description = "CLI + library for managing projects and tasks backed by Supabase"
 requires-python = ">=3.10"
 dependencies = [
   "supabase>=2.0",
   "python-dotenv>=1.0",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.0"]
+
 [project.scripts]
 taskcli = "taskcli.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["taskcli*"]
+include = ["taskcli*", "taskcli_mcp*"]

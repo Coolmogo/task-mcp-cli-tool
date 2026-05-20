@@ -111,19 +111,27 @@ Either the anon key or the service role key works. RLS is disabled on both table
 ### 1.8 Repository layout
 
 ```
-taskcli/
-├── cli.py              # argparse: entity → verb → args.func dispatch
-├── __main__.py         # `python -m taskcli` entry point
-├── api.py              # TaskCLI class + TaskCLIError (business logic + Supabase calls)
-├── db.py               # cached Supabase client; loads .env
-├── models.py           # Project, Task dataclasses + Status enum
+taskcli/                # the library (CLI + class API). No MCP dependency.
+├── cli.py              #   argparse: entity → verb → args.func dispatch
+├── __main__.py         #   `python -m taskcli` entry point
+├── api.py              #   TaskCLI class + TaskCLIError (business logic + Supabase calls)
+├── db.py               #   cached Supabase client; loads .env
+├── models.py           #   Project, Task dataclasses + Status enum
 └── commands/
-    ├── project.py      # CLI adapters for project verbs (formatting + sys.exit)
-    └── task.py         # CLI adapters for task verbs
+    ├── project.py      #   CLI adapters for project verbs (formatting + sys.exit)
+    └── task.py         #   CLI adapters for task verbs
+
+taskcli_mcp/            # one of N consumers of `taskcli`. Optional `[mcp]` extra.
+├── __init__.py
+├── __main__.py         #   `python -m taskcli_mcp` entry point
+└── server.py           #   FastMCP server registering one tool per TaskCLI method
+
 schema.sql              # idempotent Postgres DDL
-pyproject.toml          # build config + `taskcli` console script entry point
+pyproject.toml          # build config; `[project.optional-dependencies].mcp` pulls in mcp[cli]
 .env.example            # credentials template
 ```
+
+`taskcli` is the library. `taskcli_mcp` is the first of what may be several consumers that wrap `TaskCLI` — keeping them as sibling packages means other consumers (web service, scripts, alternative MCP variants) can be added without bloating the library's dependency list.
 
 ---
 
@@ -341,8 +349,131 @@ api.delete_task(id) -> None
 
 All methods return raw row dicts (or `list[dict]`) and raise `TaskCLIError` on the same conditions the CLI exits on. `status` is the string value (`"todo"`, `"in_progress"`, `"done"`). Date arguments accept either `datetime.date` or ISO `"YYYY-MM-DD"` strings.
 
-### 2.8 Troubleshooting
+### 2.8 Troubleshooting (CLI / library)
 
 - **`SUPABASE_URL and SUPABASE_KEY must be set`** — no `.env` was found walking up from cwd and `~/.config/taskcli/.env` doesn't exist either. Create one of the two.
 - **`42501 row-level security`** — RLS got turned on in Supabase without policies. Either turn it off for `projects`/`tasks` or use the service role key.
 - **Edits don't take effect after `pipx install .`** — that snapshots the source. Reinstall with `pipx install --force --editable .` (or use `--editable` from the start).
+
+---
+
+## Part 3 — Claude Desktop MCP server setup
+
+A separate sibling package, `taskcli_mcp`, ships an MCP (Model Context Protocol) server that consumes the `taskcli` library and exposes every `TaskCLI` method as a tool Claude Desktop can call. `taskcli_mcp` lives alongside `taskcli` in this repo but is its own package — `taskcli` itself has no MCP dependency, so other consumers (web UIs, scripts, future MCP variants) can import the library cleanly.
+
+Once configured, you can say things like *"list my projects"* or *"create a task in project 3 called Wireframes"* and Claude will invoke the right tool.
+
+### 3.1 Tools exposed
+
+The server registers one MCP tool per `TaskCLI` method:
+
+`add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`, `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`.
+
+Dates are passed as ISO strings (`"YYYY-MM-DD"`). `status` is one of `"todo"`, `"in_progress"`, `"done"`. Validation and not-found errors come back as plain strings prefixed with `Error:` (no tracebacks).
+
+### 3.2 Step 1 — install with the `mcp` extra
+
+The MCP SDK is an **optional extra** since `taskcli` proper doesn't depend on it. Install with the `[mcp]` extra to pull it in:
+
+```bash
+pipx install --force --editable ".[mcp]"
+# or, in a venv:
+pip install -e ".[mcp]"
+```
+
+A plain `pip install -e .` installs only the library and CLI; the MCP server won't run without the extra.
+
+### 3.3 Step 2 — locate your Python interpreter
+
+Claude Desktop needs the **absolute path** to the Python that has `taskcli` installed.
+
+- **Windows + pipx:** `C:\Users\<you>\pipx\venvs\taskcli\Scripts\python.exe`
+  `pipx environment --value PIPX_LOCAL_VENVS` prints the **parent directory** (e.g. `C:\Users\<you>\pipx\venvs`) — append `\taskcli\Scripts\python.exe` to get the actual interpreter.
+- **macOS / Linux + pipx:** `~/.local/pipx/venvs/taskcli/bin/python`
+- **venv install:** the `python` (or `python.exe`) inside your venv's `bin`/`Scripts` folder. Find it with `(Get-Command python).Source` (PowerShell) or `which python` (bash).
+
+Verify the path works. In **PowerShell**, executing a quoted path requires the call operator `&` — otherwise PowerShell parses the string as an expression and rejects the trailing arguments:
+
+```powershell
+# PowerShell — use & to invoke a quoted path
+& "C:\Users\<you>\pipx\venvs\taskcli\Scripts\python.exe" -m taskcli_mcp
+```
+
+```bash
+# bash / zsh
+"<that python path>" -m taskcli_mcp
+```
+
+The server should start silently and block waiting for stdin (MCP servers communicate over stdio and print nothing to the console on startup). Press Ctrl+C to exit. If you see `ModuleNotFoundError`, you have the wrong interpreter — try again.
+
+### 3.4 Step 3 — put credentials where the server can find them
+
+Claude Desktop launches the MCP server with an **undefined working directory**, so the cwd-walking `.env` discovery used by the CLI is unreliable here. Put a copy of your `.env` at the user-home fallback location:
+
+```powershell
+# Windows PowerShell
+New-Item -ItemType Directory -Force "$HOME\.config\taskcli" | Out-Null
+Copy-Item .env "$HOME\.config\taskcli\.env"
+```
+
+```bash
+# macOS / Linux
+mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
+```
+
+### 3.5 Step 4 — edit `claude_desktop_config.json`
+
+The config file lives at:
+
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Open it (create it if missing) and add a `taskcli` entry under `mcpServers`. Replace the `command` value with the Python path from Step 2. **Use double backslashes** in JSON strings on Windows.
+
+```json
+{
+  "mcpServers": {
+    "taskcli": {
+      "command": "C:\\Users\\<you>\\pipx\\venvs\\taskcli\\Scripts\\python.exe",
+      "args": ["-m", "taskcli_mcp"]
+    }
+  }
+}
+```
+
+If you already have other entries under `mcpServers`, merge — don't replace.
+
+### 3.6 Step 5 — restart Claude Desktop and verify
+
+Fully quit Claude Desktop (tray icon → Quit on Windows, ⌘Q on macOS — not just close the window) and relaunch. In a new chat, click the tools icon (🔌 / hammer); you should see ten tools whose names start with `taskcli`.
+
+Smoke tests:
+
+- *"List my projects."* → Claude calls `list_projects` and renders the result.
+- *"Create a project titled 'Test' from 2026-06-01 to 2026-09-30 with 4 stages, blank description."* → Claude calls `add_project` and reports the new id.
+- *"Show project 999999."* → Claude reports back `Error: Project #999999 not found` — no traceback.
+
+### 3.7 Troubleshooting (MCP)
+
+- **Tools don't appear after restart.** Check Claude Desktop's MCP logs:
+  - Windows: `%APPDATA%\Claude\logs\mcp-server-taskcli.log`
+  - macOS: `~/Library/Logs/Claude/mcp-server-taskcli.log`
+- **`ModuleNotFoundError: No module named 'taskcli'`** in the log — the `command` is pointing at the wrong Python. Redo Step 2 and Step 3.
+- **`SUPABASE_URL and SUPABASE_KEY must be set`** in the log — the server couldn't find a `.env`. Put one at `~/.config/taskcli/.env` (Step 4).
+- **Server crashes silently on launch.** Run `python -m taskcli_mcp` manually in a terminal using the exact Python from your config — any stack trace prints there.
+- **Tools work but data looks stale.** The CLI and MCP server hit the same Supabase tables; refresh the chat or re-call `list_*` to pull current state.
+- **`pipx install --force --editable ".[mcp]"` fails with `A virtual environment already exists ... Use --clear to replace it`.** This is a pipx + uv interaction bug — `--force` doesn't pass `--clear` through to uv's venv builder. Uninstall first, then reinstall cleanly:
+  ```powershell
+  pipx uninstall taskcli
+  pipx install --editable ".[mcp]"
+  ```
+
+### 3.8 Optional — interactive inspector during development
+
+`mcp[cli]` ships with a local inspector that lets you call tools manually without going through Claude Desktop:
+
+```bash
+mcp dev taskcli_mcp/server.py
+```
+
+It opens a browser UI showing all registered tools, their schemas, and a form to invoke each one. Useful when iterating on the server code.
