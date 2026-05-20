@@ -1,6 +1,6 @@
 # task
 
-A CLI + MCP server for managing **Projects** and the **Tasks** that belong to them, backed by Supabase Postgres.
+A CLI + MCP server for managing **Projects** and the **Tasks** that belong to them, backed by Supabase Postgres. Built for [Coolmogo.ai](https://coolmogo.ai). 
 
 ---
 
