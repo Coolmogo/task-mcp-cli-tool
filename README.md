@@ -59,6 +59,19 @@ SUPABASE_KEY=your-anon-or-service-role-key
 
 `.env` is gitignored. The CLI looks for it in the current working directory and walks up parent directories, so you can run `taskcli` from anywhere inside the project tree.
 
+To run `taskcli` from **any** directory (e.g. `C:\` or your home folder), also place a copy at `~/.config/taskcli/.env` — the CLI falls back to that location when no `.env` is found by walking up from the cwd.
+
+```powershell
+# Windows PowerShell
+New-Item -ItemType Directory -Force "$HOME\.config\taskcli" | Out-Null
+Copy-Item .env "$HOME\.config\taskcli\.env"
+```
+
+```bash
+# macOS / Linux
+mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
+```
+
 ## Usage
 
 ### Projects

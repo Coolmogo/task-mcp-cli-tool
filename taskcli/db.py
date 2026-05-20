@@ -1,11 +1,16 @@
 import os
 import sys
 from functools import lru_cache
+from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 from supabase import create_client, Client
 
-load_dotenv(find_dotenv(usecwd=True))
+_found = find_dotenv(usecwd=True)
+if _found:
+    load_dotenv(_found)
+else:
+    load_dotenv(Path.home() / ".config" / "taskcli" / ".env")
 
 
 @lru_cache(maxsize=1)
