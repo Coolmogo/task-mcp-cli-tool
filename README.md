@@ -26,6 +26,30 @@ flowchart LR
 
 **Data model** — two tables (`projects`, `tasks`) and one `task_status` enum (`todo` / `in_progress` / `done`). Full DDL in [`schema.sql`](./schema.sql) — idempotent, paste into the Supabase SQL editor.
 
+```mermaid
+erDiagram
+    projects ||--o{ tasks : "has"
+    projects {
+        int8 id PK
+        text title
+        text description
+        date start_date
+        date end_date
+        int4 no_of_stages
+    }
+    tasks {
+        int8 id PK
+        int8 project_id FK
+        text title
+        text description
+        task_status status
+        text assigned_to
+        int4 stage
+        date start_date
+        date end_date
+    }
+```
+
 **Credentials** — copy `.env.example` to `.env` and fill in `SUPABASE_URL` and `SUPABASE_KEY`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat).
 
 **Setup** — see [`SETUP.md`](./SETUP.md) for step-by-step install instructions (one track for the CLI, one for the MCP server).
