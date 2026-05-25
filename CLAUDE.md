@@ -6,13 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `task` is a pipx-installable CLI plus MCP server that manages **Projects** and the **Tasks** that belong to them, persisted in a Supabase Postgres database. User-facing setup, install, and full command reference live in [`README.md`](./README.md) — read it for context the first time you touch this repo, but don't duplicate it here.
 
-The codebase is split into one execution layer and two clients:
+The codebase is split into one execution layer and three clients:
 
 - `task_program/` — execution layer. `TaskCLI` class + Supabase access. No CLI or MCP code.
 - `task_cli/` — CLI client. Imports `TaskCLI` from `task_program`.
 - `task_mcp/` — MCP server client. Imports `TaskCLI` from `task_program`.
+- `task_api/` — REST API client. Imports `TaskCLI` from `task_program`.
 
-`task_cli` and `task_mcp` are peers; both consume the same execution-layer API. Adding another client (web service, alternative MCP variant) means a new sibling package, not changes to `task_program`.
+`task_cli`, `task_mcp`, and `task_api` are peers; all consume the same execution-layer API. Adding another client (web service, alternative MCP variant) means a new sibling package, not changes to `task_program`.
 
 ## Run during development
 
@@ -20,6 +21,7 @@ The codebase is split into one execution layer and two clients:
 pip install -e .              # editable install — registers the `task` command
 python -m task_cli --help     # invoke without going through pipx
 python -m task_mcp            # launch the MCP server
+python -m task_api            # launch the REST API
 ```
 
 `task` (installed via pipx or `pip install -e .`) and `python -m task_cli` both dispatch through `task_cli/cli.py:main`, which calls `TaskCLI` methods from `task_program`.
@@ -31,7 +33,7 @@ python -m task_mcp            # launch the MCP server
 ```
 task_program/           # execution layer (library only)
 ├── __init__.py         #   exports TaskCLI, TaskCLIError
-├── api.py              #   TaskCLI class — validation + Supabase calls
+├── program.py          #   TaskCLI class — validation + Supabase calls
 ├── db.py               #   cached Supabase client; reads SUPABASE_URL/KEY from .env
 └── models.py           #   Project, Task dataclasses + Status enum
 
@@ -46,6 +48,11 @@ task_mcp/               # MCP server client (optional [mcp] extra)
 ├── __main__.py         #   `python -m task_mcp` shim
 └── server.py           #   FastMCP server; one tool per TaskCLI method
 
+task_api/               # REST API client
+├── __main__.py         #   `python -m task_api` shim
+├── app.py              #   FastAPI routes + TaskCLI error mapping
+└── schemas.py          #   Pydantic request/response models
+
 schema.sql              # one-shot Supabase DDL (idempotent)
 ```
 
@@ -57,8 +64,8 @@ schema.sql              # one-shot Supabase DDL (idempotent)
 
 ## Conventions and gotchas
 
-- **`task_status` Postgres enum mirrors `Status` in `task_program/models.py`.** Adding/renaming a status means a SQL migration *and* a Python enum change — keep them in sync.
-- **`tasks.stage` upper bound (`<= projects.no_of_stages`) is enforced in `TaskCLI`**, not in SQL. Postgres CHECK can't reference another table without a trigger, and the in-code message is friendlier. Validation lives in `task_program/api.py::TaskCLI._validate_stage`.
+- **`task_status` Postgres enum mirrors `Status` in `task_program/models.py`.** Adding/renaming a status means a SQL migration _and_ a Python enum change — keep them in sync.
+- **`tasks.stage` upper bound (`<= projects.no_of_stages`) is enforced in `TaskCLI`**, not in SQL. Postgres CHECK can't reference another table without a trigger, and the in-code message is friendlier. Validation lives in `task_program/program.py::TaskCLI._validate_stage`.
 - **Date handling:** argparse parses with the `_date` type adapter in `task_cli/cli.py` (returns `datetime.date`). `TaskCLI` methods accept either `date` or ISO strings and normalize via `_to_date`. Insert payloads call `.isoformat()`.
 - **CLI errors exit with `sys.exit("message")`**, not raised exceptions, so users see one clean line with no traceback. The execution layer raises `TaskCLIError`; the CLI adapter is what translates that into `sys.exit`. Don't replace these patterns.
 - **MCP errors return `f"Error: {e}"`** strings. The MCP layer never raises out to Claude Desktop.
@@ -71,10 +78,11 @@ schema.sql              # one-shot Supabase DDL (idempotent)
 
 1. Edit `schema.sql` and run an `ALTER TABLE` in Supabase (the SQL editor accepts ad-hoc `ALTER`s — `schema.sql` itself just needs to reflect the new shape for fresh installs).
 2. Update the dataclass in `task_program/models.py`.
-3. Update the relevant `TaskCLI` method(s) in `task_program/api.py` — add the parameter to `add_*` and to the keyword-only block on `update_*`, and include it in the payload dict on both paths.
+3. Update the relevant `TaskCLI` method(s) in `task_program/program.py` — add the parameter to `add_*` and to the keyword-only block on `update_*`, and include it in the payload dict on both paths.
 4. Add the argparse argument in `task_cli/cli.py` to **both** the `add` and `update` verbs for that entity. Required on `add`, optional on `update`. Wire the new arg into the matching call in `task_cli/commands/*.py`.
 5. Add the parameter to the matching MCP tool in `task_mcp/server.py` (with a sensible `Optional[...] = None` default for update).
-6. If the README's command examples reference the new field, update them too.
+6. If the REST API exposes the field, add it to `task_api/schemas.py` and the relevant route adapter in `task_api/app.py`.
+7. If the README's command examples reference the new field, update them too.
 
 ## Keep the README in sync
 

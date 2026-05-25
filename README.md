@@ -6,13 +6,14 @@ A CLI + MCP server for managing **Projects** and the **Tasks** that belong to th
 
 ## 1. Project overview
 
-The repo is split into one execution layer and two clients that wrap it:
+The repo is split into one execution layer and three clients that wrap it:
 
 - **`task_program/`** — execution layer. `TaskCLI` class + Supabase access. No CLI or MCP code.
 - **`task_cli/`** — CLI client. Imports `TaskCLI` from `task_program`.
 - **`task_mcp/`** — MCP server client. Imports `TaskCLI` from `task_program`.
+- **`task_api/`** — REST API client. Imports `TaskCLI` from `task_program`.
 
-`task_cli` and `task_mcp` are peers; adding another consumer (web service, scripts) means a new sibling package, not changes to `task_program`.
+`task_cli`, `task_mcp`, and `task_api` are peers; adding another consumer (web service, scripts) means a new sibling package, not changes to `task_program`.
 
 ```mermaid
 flowchart LR
@@ -52,13 +53,13 @@ erDiagram
 
 **Credentials** — copy `.env.example` to `.env` and fill in `SUPABASE_URL` and `SUPABASE_KEY`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat).
 
-**Setup** — see [`SETUP.md`](./SETUP.md) for step-by-step install instructions (one track for the CLI, one for the MCP server).
+**Setup** — see [`SETUP.md`](./SETUP.md) for step-by-step install instructions (tracks for the REST API, CLI, and MCP server).
 
 ---
 
 ## 2. Execution layer (`task_program/`)
 
-`task_program/api.py` defines:
+`task_program/program.py` defines:
 
 - `TaskCLIError(Exception)` — raised on validation or not-found failures.
 - `TaskCLI` — one method per CRUD verb:
@@ -91,7 +92,45 @@ Supabase client is `lru_cache`d in `task_program/db.py` — built once per proce
 
 ---
 
-## 3. CLI tool (`task_cli/`)
+## 3. REST API (`task_api/`)
+
+`task_api` exposes a thin FastAPI service over `TaskCLI`. It parses JSON requests, calls `TaskCLI`, and maps `TaskCLIError` to HTTP responses without duplicating backend validation.
+
+Run it locally from the repo root:
+
+```bash
+python -m task_api
+```
+
+By default it serves on `http://127.0.0.1:8000`. Override with `TASK_API_HOST` and `TASK_API_PORT` if needed.
+
+Endpoints:
+
+- `GET /health`
+- `GET /projects`
+- `GET /projects/{id}`
+- `POST /projects`
+- `PATCH /projects/{id}`
+- `DELETE /projects/{id}`
+- `GET /tasks`
+- `GET /tasks/{id}`
+- `POST /tasks`
+- `PATCH /tasks/{id}`
+- `DELETE /tasks/{id}`
+
+Example requests:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/projects
+curl "http://127.0.0.1:8000/tasks?project_id=1&status=todo"
+```
+
+The API uses the same `.env` discovery as the CLI and MCP server because it calls `task_program` directly.
+
+---
+
+## 4. CLI tool (`task_cli/`)
 
 The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `project|task` → `add|list|show|update|delete`.
 
@@ -129,7 +168,7 @@ task task delete 1
 
 ---
 
-## 4. MCP server (`task_mcp/`)
+## 5. MCP server (`task_mcp/`)
 
 `task_mcp/server.py` registers one MCP tool per `TaskCLI` method, with the same names as the methods (`add_project`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
 
@@ -137,4 +176,4 @@ Tools exposed: `add_project`, `list_projects`, `get_project`, `update_project`, 
 
 Once configured in Claude Desktop, plain-English requests like *"list my projects"* or *"create a task in project 3 called Wireframes"* are routed to the matching tool.
 
-**Setup** — see [`SETUP.md`](./SETUP.md) Track B for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
+**Setup** — see [`SETUP.md`](./SETUP.md) Track C for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
