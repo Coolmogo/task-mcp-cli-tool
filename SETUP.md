@@ -1,6 +1,6 @@
 # Setup
 
-Two setup tracks — one for the CLI tool, one for the MCP server. Both share the same prerequisites and Supabase schema, so do those once first.
+Three setup tracks — one for the REST API, one for the CLI tool, one for the MCP server. Both share the same prerequisites and Supabase schema, so do those once first.
 
 ## Prerequisites (shared)
 
@@ -25,9 +25,51 @@ Done with the shared prep. Now pick a track below.
 
 ---
 
-## Track A — CLI tool
+## Track A — REST API
 
 ### A1. Install
+
+From the repo root:
+
+```bash
+pip install -e .
+```
+
+### A2. Run
+
+```bash
+python -m task_api
+```
+
+Defaults:
+
+- Host: `127.0.0.1`
+- Port: `8000`
+
+Override them if needed:
+
+```bash
+TASK_API_HOST=0.0.0.0 TASK_API_PORT=8080 python -m task_api
+```
+
+### A3. Verify
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/projects
+```
+
+### A4. Troubleshooting
+
+- **`SUPABASE_URL and SUPABASE_KEY must be set`** — `.env` not found. Run from inside the project tree or place `.env` in `~/.config/taskcli/.env`.
+- **Port already in use** — set `TASK_API_PORT` to another port.
+- **`42501 row-level security`** — you turned RLS on in Supabase without policies. Either turn it off for `projects`/`tasks` or switch to the service-role key.
+
+---
+
+## Track B — CLI tool
+
+### B1. Install
 
 From the repo root:
 
@@ -39,16 +81,16 @@ pipx install --editable .
 
 (For development without pipx: `pip install -e .`, then use `python -m task_cli` instead of `task`.)
 
-### A2. Verify
+### B2. Verify
 
 ```bash
 task --help
 task project list      # should print "No projects." or your existing list
 ```
 
-If you get `SUPABASE_URL and SUPABASE_KEY must be set`, the CLI couldn't find your `.env` — see A3.
+If you get `SUPABASE_URL and SUPABASE_KEY must be set`, the CLI couldn't find your `.env` — see B3.
 
-### A3. (Optional) Make it work from outside the project tree
+### B3. (Optional) Make it work from outside the project tree
 
 By default the CLI walks up parent directories from cwd to find `.env`. If you want `task` to work from `C:\` or your home folder too, copy `.env` to the fallback location:
 
@@ -65,7 +107,7 @@ mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
 
 (The directory is named `taskcli` rather than `task` for back-compat with the pre-rename layout.)
 
-### A4. Smoke test
+### B4. Smoke test
 
 ```bash
 task project add --title "Test" --description "" \
@@ -76,7 +118,7 @@ task project delete <id_from_above>
 
 See the README for the full command reference.
 
-### A5. Troubleshooting
+### B5. Troubleshooting
 
 - **`SUPABASE_URL and SUPABASE_KEY must be set`** — `.env` not found. Either run from inside the project tree or do A3.
 - **`42501 row-level security`** — you turned RLS on in Supabase without policies. Either turn it off for `projects`/`tasks` or switch to the service-role key.
@@ -84,9 +126,9 @@ See the README for the full command reference.
 
 ---
 
-## Track B — MCP server (Claude Desktop)
+## Track C — MCP server (Claude Desktop)
 
-### B1. Install with the MCP extra
+### C1. Install with the MCP extra
 
 The MCP SDK is an optional dependency. From the repo root:
 
@@ -94,7 +136,7 @@ The MCP SDK is an optional dependency. From the repo root:
 pipx install --editable ".[mcp]"
 ```
 
-This gets you both the `task` CLI command **and** the ability to run `python -m task_mcp`. If you already installed via Track A, reinstall with the extra:
+This gets you both the `task` CLI command **and** the ability to run `python -m task_mcp`. If you already installed via Track B, reinstall with the extra:
 
 ```bash
 pipx uninstall task
@@ -103,7 +145,7 @@ pipx install --editable ".[mcp]"
 
 (The `pipx install --force` flag has a known bug with the uv backend — uninstall first instead.)
 
-### B2. Locate your Python interpreter
+### C2. Locate your Python interpreter
 
 Claude Desktop needs the absolute path to the Python that has the `task` package installed.
 
@@ -125,9 +167,9 @@ Verify it works (should start silently and block on stdin — that's the MCP ser
 
 If you see `ModuleNotFoundError`, you have the wrong interpreter, or you forgot the `[mcp]` extra.
 
-### B3. Put credentials at the fallback location
+### C3. Put credentials at the fallback location
 
-Claude Desktop launches the MCP server with an **undefined working directory**, so the cwd-walking `.env` discovery from Track A is unreliable. Copy `.env` to the fallback path:
+Claude Desktop launches the MCP server with an **undefined working directory**, so the cwd-walking `.env` discovery from Track B is unreliable. Copy `.env` to the fallback path:
 
 ```powershell
 # Windows PowerShell
@@ -140,14 +182,14 @@ Copy-Item .env "$HOME\.config\taskcli\.env"
 mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
 ```
 
-### B4. Edit `claude_desktop_config.json`
+### C4. Edit `claude_desktop_config.json`
 
 The config file lives at:
 
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-Open it (create if missing) and add a `task` entry under `mcpServers`. Use the Python path from B2. **Double-backslash all Windows paths in JSON.**
+Open it (create if missing) and add a `task` entry under `mcpServers`. Use the Python path from C2. **Double-backslash all Windows paths in JSON.**
 
 ```json
 {
@@ -162,7 +204,7 @@ Open it (create if missing) and add a `task` entry under `mcpServers`. Use the P
 
 If you already have other `mcpServers` entries, merge — don't replace.
 
-### B5. Restart Claude Desktop and verify
+### C5. Restart Claude Desktop and verify
 
 Fully quit Claude Desktop (tray icon → Quit on Windows, ⌘Q on macOS — not just close the window). Relaunch. In a new chat, click the tools icon (🔌 / hammer); you should see ten tools registered under the `task` server (`add_project`, `list_projects`, `add_task`, …).
 
@@ -172,7 +214,7 @@ Smoke tests inside Claude:
 - *"Create a project titled 'Test' from 2026-06-01 to 2026-09-30 with 4 stages, blank description."* → calls `add_project`.
 - *"Show project 999999."* → returns `Error: Project #999999 not found` (no traceback).
 
-### B6. (Optional) Interactive inspector during development
+### C6. (Optional) Interactive inspector during development
 
 ```bash
 mcp dev task_mcp/server.py
@@ -180,13 +222,13 @@ mcp dev task_mcp/server.py
 
 Opens a browser UI listing all tools with their schemas and a form to invoke each. Useful when iterating on the server.
 
-### B7. Troubleshooting
+### C7. Troubleshooting
 
 - **Tools don't appear after restart.** Check the MCP logs:
   - Windows: `%APPDATA%\Claude\logs\mcp-server-task.log`
   - macOS: `~/Library/Logs/Claude/mcp-server-task.log`
-- **`ModuleNotFoundError: No module named 'task_program'`** in the log — wrong Python in B4. Redo B2.
-- **`ModuleNotFoundError: No module named 'mcp'`** — you installed without the `[mcp]` extra. Redo B1.
-- **`SUPABASE_URL and SUPABASE_KEY must be set`** — `.env` missing at the fallback path. Redo B3.
-- **Server crashes silently on launch.** Run the B2 verify command manually — any stack trace prints to your terminal.
+- **`ModuleNotFoundError: No module named 'task_program'`** in the log — wrong Python in C4. Redo C2.
+- **`ModuleNotFoundError: No module named 'mcp'`** — you installed without the `[mcp]` extra. Redo C1.
+- **`SUPABASE_URL and SUPABASE_KEY must be set`** — `.env` missing at the fallback path. Redo C3.
+- **Server crashes silently on launch.** Run the C2 verify command manually — any stack trace prints to your terminal.
 - **Data looks stale.** CLI and MCP share the same Supabase tables; re-call `list_*` to refresh.

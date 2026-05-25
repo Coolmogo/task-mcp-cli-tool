@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "CLI + MCP clients over a shared task_program execution layer, backed by Supabase"
 requires-python = ">=3.10"
 dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
   "supabase>=2.0",
   "python-dotenv>=1.0",
 ]
@@ -19,4 +21,4 @@ mcp = ["mcp[cli]>=1.0"]
 task = "task_cli.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["task_program*", "task_cli*", "task_mcp*"]
+include = ["task_program*", "task_cli*", "task_mcp*", "task_api*"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional, Union
 
-from supabase import create_client, Client
+from supabase import Client, create_client
 
 from .db import client as _default_client
 
@@ -43,8 +43,6 @@ class TaskCLI:
         else:
             self._client = _default_client()
 
-    # ---- internal helpers ---------------------------------------------------
-
     def _get_project_row(self, project_id: int) -> dict:
         res = self._client.table(self.PROJECTS).select("*").eq("id", project_id).execute()
         if not res.data:
@@ -63,8 +61,6 @@ class TaskCLI:
             raise TaskCLIError(
                 f"Stage must be 1..{project['no_of_stages']} for project #{project['id']}"
             )
-
-    # ---- projects -----------------------------------------------------------
 
     def add_project(
         self,
@@ -133,8 +129,6 @@ class TaskCLI:
     def delete_project(self, id: int) -> None:
         self._get_project_row(id)
         self._client.table(self.PROJECTS).delete().eq("id", id).execute()
-
-    # ---- tasks --------------------------------------------------------------
 
     def add_task(
         self,
