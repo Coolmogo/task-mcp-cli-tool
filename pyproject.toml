@@ -14,9 +14,10 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
+api = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 
 [project.scripts]
 task = "task_cli.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["task_program*", "task_cli*", "task_mcp*"]
+include = ["task_program*", "task_cli*", "task_mcp*", "task_api*"]

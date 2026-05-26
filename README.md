@@ -8,21 +8,23 @@ A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activ
 
 ## 1. Project overview
 
-The repo is split into one execution layer and two clients that wrap it:
+The repo is split into one execution layer and three clients that wrap it:
 
-- **`task_program/`** — execution layer. `TaskCLI` class + Supabase access. No CLI or MCP code.
+- **`task_program/`** — execution layer. `TaskCLI` class + Supabase access. No CLI, MCP, or HTTP code.
 - **`task_cli/`** — CLI client. Imports `TaskCLI` from `task_program`.
 - **`task_mcp/`** — MCP server client. Imports `TaskCLI` from `task_program`.
+- **`task_api/`** — FastAPI REST client. Imports `TaskCLI` from `task_program`.
 
-`task_cli` and `task_mcp` are peers; adding another consumer (web service, scripts) means a new sibling package, not changes to `task_program`.
+`task_cli`, `task_mcp`, and `task_api` are peers; adding another consumer means a new sibling package, not changes to `task_program`.
 
 ```mermaid
 flowchart LR
     shell["shell<br/><code>task ...</code>"] --> cli["task_cli"]
     claude["Claude Desktop"] -- MCP/stdio --> mcp["task_mcp"]
-    other["other Python"] --> api
+    http["HTTP / Postman"] --> rest["task_api"]
     cli --> api["task_program<br/><b>TaskCLI</b>"]
     mcp --> api
+    rest --> api
     api --> supabase[("Supabase Postgres")]
 ```
 
@@ -152,3 +154,55 @@ Tools exposed: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task
 Once configured in Claude Desktop, plain-English requests like *"list my in-progress tasks"* or *"add a comment to task 3 saying the design is approved"* are routed to the matching tool.
 
 **Setup** — see [`SETUP.md`](./SETUP.md) Track B for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
+
+---
+
+## 5. REST API (`task_api/`)
+
+`task_api/server.py` is a barebones [FastAPI](https://fastapi.tiangolo.com/) app — one route per active `TaskCLI` method. It's a peer of the CLI and MCP clients. `TaskCLIError` is translated to an HTTP error by a single exception handler: lookups that miss return **404**, validation failures return **400**, both with a `{"detail": "..."}` body. There is no auth — it binds to `127.0.0.1` for single-user local use, matching the RLS-disabled design.
+
+**Install & run:**
+
+```bash
+pip install -e ".[api]"     # adds fastapi + uvicorn
+python -m task_api          # serves on http://127.0.0.1:8000
+```
+
+Interactive Swagger docs are at `http://127.0.0.1:8000/docs`.
+
+**Endpoints:**
+
+| Method & path                        | Action                                              |
+|--------------------------------------|-----------------------------------------------------|
+| `POST   /tasks`                      | Create a task (JSON body)                           |
+| `GET    /tasks?status=&project=`     | List tasks, optional `status`/`project` filters     |
+| `GET    /tasks/{id}`                 | Fetch one task with embedded `activities`+`comments`|
+| `PATCH  /tasks/{id}`                 | Update sent fields only (auto-logs history)         |
+| `DELETE /tasks/{id}`                 | Delete a task (history + comments cascade)          |
+| `POST   /tasks/{task_id}/comments`   | Add a comment (JSON body `{"text": "..."}`)         |
+| `GET    /tasks/{task_id}/comments`   | List a task's comments, oldest first                |
+| `GET    /tasks/{task_id}/activities` | List a task's activity history, oldest first        |
+
+Write endpoints take a JSON body. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). On `PATCH`, only the fields present in the body change — omitted fields are left untouched.
+
+**Examples:**
+
+```bash
+# create
+curl -X POST http://127.0.0.1:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Write report", "status": "In Progress", "due": "2026-06-01"}'
+
+# update one field (records a history entry)
+curl -X PATCH http://127.0.0.1:8000/tasks/1 \
+  -H "Content-Type: application/json" \
+  -d '{"status": "Done"}'
+
+# fetch with embedded activities + comments
+curl http://127.0.0.1:8000/tasks/1
+
+# add a comment
+curl -X POST http://127.0.0.1:8000/tasks/1/comments \
+  -H "Content-Type: application/json" \
+  -d '{"text": "design approved"}'
+```
