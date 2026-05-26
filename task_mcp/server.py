@@ -4,14 +4,12 @@ Launch with: ``python -m task_mcp``
 """
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from task_program import TaskCLI, TaskCLIError
-
-
-StatusLiteral = Literal["todo", "in_progress", "done"]
+from task_program.models import DEFAULT_STATUS
 
 
 mcp = FastMCP("task")
@@ -26,10 +24,124 @@ def _api() -> TaskCLI:
     return _api_singleton
 
 
-# ---- project tools ---------------------------------------------------------
+# ---- task tools ------------------------------------------------------------
 
 
 @mcp.tool()
+def add_task(
+    title: str,
+    description: Optional[str] = None,
+    status: str = DEFAULT_STATUS,
+    assignee_id: Optional[int] = None,
+    stage_id: Optional[str] = None,
+    due: Optional[str] = None,
+) -> dict | str:
+    """Create a task. status is free text (default 'To Do'). due is ISO (YYYY-MM-DD).
+    assignee_id references a user (user management is not wired up yet, leave null)."""
+    try:
+        return _api().add_task(
+            title=title,
+            description=description,
+            status=status,
+            assignee_id=assignee_id,
+            stage_id=stage_id,
+            due=due,
+        )
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def list_tasks(status: Optional[str] = None) -> list[dict] | str:
+    """List tasks. Optionally filter by status."""
+    try:
+        return _api().list_tasks(status=status)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def get_task(id: int) -> dict | str:
+    """Fetch a single task by id, with its embedded activity history and comments."""
+    try:
+        return _api().get_task(id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def update_task(
+    id: int,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    status: Optional[str] = None,
+    assignee_id: Optional[int] = None,
+    stage_id: Optional[str] = None,
+    due: Optional[str] = None,
+) -> dict | str:
+    """Update one or more fields on a task. Pass only the fields you want to change.
+    Each changed field is recorded automatically in the task's activity history."""
+    try:
+        return _api().update_task(
+            id,
+            title=title,
+            description=description,
+            status=status,
+            assignee_id=assignee_id,
+            stage_id=stage_id,
+            due=due,
+        )
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def delete_task(id: int) -> str:
+    """Delete a task by id. Its activity history and comments are cascaded."""
+    try:
+        _api().delete_task(id)
+        return f"Deleted task #{id}"
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+# ---- comment / activity tools ----------------------------------------------
+
+
+@mcp.tool()
+def add_comment(task_id: int, text: str) -> dict | str:
+    """Add a comment to a task."""
+    try:
+        return _api().add_comment(task_id, text)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def list_comments(task_id: int) -> list[dict] | str:
+    """List a task's comments, oldest first."""
+    try:
+        return _api().list_comments(task_id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def list_activities(task_id: int) -> list[dict] | str:
+    """List a task's activity history (auto-recorded field changes), oldest first."""
+    try:
+        return _api().list_activities(task_id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+# ---- project tools (dead: reintroduce later) -------------------------------
+# Projects are shelved. The functions are kept but their @mcp.tool() decorators
+# are commented out so they are NOT exposed to Claude Desktop. Re-add the
+# decorators to bring projects back.
+
+
+# @mcp.tool()
 def add_project(
     title: str,
     description: str,
@@ -50,7 +162,7 @@ def add_project(
         return f"Error: {e}"
 
 
-@mcp.tool()
+# @mcp.tool()
 def list_projects() -> list[dict] | str:
     """List every project."""
     try:
@@ -59,7 +171,7 @@ def list_projects() -> list[dict] | str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+# @mcp.tool()
 def get_project(id: int) -> dict | str:
     """Fetch a single project by id."""
     try:
@@ -68,7 +180,7 @@ def get_project(id: int) -> dict | str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+# @mcp.tool()
 def update_project(
     id: int,
     title: Optional[str] = None,
@@ -91,100 +203,12 @@ def update_project(
         return f"Error: {e}"
 
 
-@mcp.tool()
+# @mcp.tool()
 def delete_project(id: int) -> str:
     """Delete a project. All its tasks are cascaded."""
     try:
         _api().delete_project(id)
         return f"Deleted project #{id} (and its tasks)"
-    except TaskCLIError as e:
-        return f"Error: {e}"
-
-
-# ---- task tools ------------------------------------------------------------
-
-
-@mcp.tool()
-def add_task(
-    project: int,
-    title: str,
-    description: str,
-    status: StatusLiteral,
-    assigned_to: str,
-    stage: int,
-    start: str,
-    end: str,
-) -> dict | str:
-    """Create a task inside a project. stage must be 1..project.no_of_stages. Dates are ISO (YYYY-MM-DD)."""
-    try:
-        return _api().add_task(
-            project=project,
-            title=title,
-            description=description,
-            status=status,
-            assigned_to=assigned_to,
-            stage=stage,
-            start=start,
-            end=end,
-        )
-    except TaskCLIError as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def list_tasks(
-    project: Optional[int] = None,
-    status: Optional[StatusLiteral] = None,
-) -> list[dict] | str:
-    """List tasks. Optionally filter by project id and/or status."""
-    try:
-        return _api().list_tasks(project=project, status=status)
-    except TaskCLIError as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def get_task(id: int) -> dict | str:
-    """Fetch a single task by id."""
-    try:
-        return _api().get_task(id)
-    except TaskCLIError as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def update_task(
-    id: int,
-    title: Optional[str] = None,
-    description: Optional[str] = None,
-    status: Optional[StatusLiteral] = None,
-    assigned_to: Optional[str] = None,
-    stage: Optional[int] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-) -> dict | str:
-    """Update one or more fields on a task. Pass only the fields you want to change."""
-    try:
-        return _api().update_task(
-            id,
-            title=title,
-            description=description,
-            status=status,
-            assigned_to=assigned_to,
-            stage=stage,
-            start=start,
-            end=end,
-        )
-    except TaskCLIError as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def delete_task(id: int) -> str:
-    """Delete a task by id."""
-    try:
-        _api().delete_task(id)
-        return f"Deleted task #{id}"
     except TaskCLIError as e:
         return f"Error: {e}"
 

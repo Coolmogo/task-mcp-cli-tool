@@ -1,6 +1,8 @@
 # task
 
-A CLI + MCP server for managing **Projects** and the **Tasks** that belong to them, backed by Supabase Postgres. Built for [Coolmogo.ai](https://coolmogo.ai). 
+A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activity history** and free-text **comments** — backed by Supabase Postgres. Built for [Coolmogo.ai](https://coolmogo.ai).
+
+> **Projects are shelved for now.** The projects table and all project code (dataclass, `TaskCLI` methods, CLI parser, MCP tools) remain in the repo as dead code to reintroduce later, but they are not wired into the active CLI/MCP surface. Tasks carry an optional `project_id`/`stage_id` but no project commands are exposed.
 
 ---
 
@@ -24,29 +26,41 @@ flowchart LR
     api --> supabase[("Supabase Postgres")]
 ```
 
-**Data model** — two tables (`projects`, `tasks`) and one `task_status` enum (`todo` / `in_progress` / `done`). Full DDL in [`schema.sql`](./schema.sql) — idempotent, paste into the Supabase SQL editor.
+**Data model** — `tasks` plus `activities` (auto-recorded history) and `comments`, with a `users` table referenced by `assignee_id`/`author_id` as *dead structure* (no rows yet — user management isn't built, so assignee/authors stay null). `status` is free text (default `'To Do'`). Full DDL for fresh installs in [`schema.sql`](./schema.sql); to reshape an existing database use [`migration.sql`](./migration.sql) (destructive — see its header). Both paste into the Supabase SQL editor.
 
 ```mermaid
 erDiagram
-    projects ||--o{ tasks : "has"
-    projects {
-        int8 id PK
-        text title
-        text description
-        date start_date
-        date end_date
-        int4 no_of_stages
-    }
+    users ||--o{ tasks : "assignee (dead)"
+    tasks ||--o{ activities : "has"
+    tasks ||--o{ comments : "has"
     tasks {
         int8 id PK
-        int8 project_id FK
         text title
         text description
-        task_status status
-        text assigned_to
-        int4 stage
-        date start_date
-        date end_date
+        text status
+        date due_date
+        int8 assignee_id FK "dead, null"
+        text stage_id
+        int8 project_id FK "shelved, null"
+    }
+    activities {
+        int8 id PK
+        int8 task_id FK
+        text type "history|comment"
+        text action "updated|removed|assigned|moved|commented"
+        text field
+        text old_value
+        text new_value
+        text text
+        int8 author_id FK "dead, null"
+        timestamptz created_at
+    }
+    comments {
+        int8 id PK
+        int8 task_id FK
+        text text
+        int8 author_id FK "dead, null"
+        timestamptz created_at
     }
 ```
 
@@ -58,33 +72,36 @@ erDiagram
 
 ## 2. Execution layer (`task_program/`)
 
-`task_program/api.py` defines:
+`task_program/program.py` defines:
 
 - `TaskCLIError(Exception)` — raised on validation or not-found failures.
-- `TaskCLI` — one method per CRUD verb:
-  - Projects: `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
+- `TaskCLI` — one method per verb:
   - Tasks: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`
+  - Comments: `add_comment`, `list_comments`
+  - Activities: `list_activities`
+  - Projects (dead, kept for later): `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
 
-All methods return raw row dicts (or `list[dict]`). Date arguments accept either `datetime.date` or ISO strings (`"2026-06-01"`). `status` is a plain string matching the enum.
+All methods return raw row dicts (or `list[dict]`). `due` accepts either `datetime.date` or an ISO string (`"2026-06-01"`); `status` is any string (default `'To Do'`).
 
-Validation centralized in `TaskCLI`: `end_date >= start_date`, `stages >= 1`, `1 <= stage <= project.no_of_stages`, project/task existence on lookups, and "at least one field" on updates. The stage upper bound is enforced in code rather than SQL because Postgres `CHECK` can't reference another table without a trigger.
+`update_task` **auto-records history**: it diffs the current row against your update and writes one `activities` row per changed field (`action` = `updated`/`assigned`/`moved`, or `removed` when a field is cleared). `get_task` returns the task with embedded `activities` and `comments` lists. Validation is minimal now: task existence on lookups and "at least one field" on updates.
 
 ```python
 from task_program import TaskCLI, TaskCLIError
 
 api = TaskCLI()  # or TaskCLI(supabase_url=..., supabase_key=...)
 
-p = api.add_project(title="Launch v1", description="Q3", start="2026-06-01",
-                    end="2026-09-30", stages=4)
-t = api.add_task(project=p["id"], title="Wireframes", description="",
-                 status="todo", assigned_to="Aarav", stage=1,
-                 start="2026-06-01", end="2026-06-15")
-api.update_task(t["id"], status="in_progress")
+t = api.add_task(title="Wireframes", description="first cut",
+                 status="To Do", due="2026-06-15")
+api.update_task(t["id"], status="In Progress")   # logs a 'moved' activity
+api.add_comment(t["id"], "kickoff call done")
+
+full = api.get_task(t["id"])
+print(full["status"], len(full["activities"]), len(full["comments"]))
 
 try:
-    api.get_project(999)
+    api.get_task(999)
 except TaskCLIError as e:
-    print(e)  # "Project #999 not found"
+    print(e)  # "Task #999 not found"
 ```
 
 Supabase client is `lru_cache`d in `task_program/db.py` — built once per process. No ORM, no repository layer.
@@ -93,37 +110,34 @@ Supabase client is `lru_cache`d in `task_program/db.py` — built once per proce
 
 ## 3. CLI tool (`task_cli/`)
 
-The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `project|task` → `add|list|show|update|delete`.
+The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `task` → `add|list|show|update|delete`, plus `comment` → `add|list` and `activity` → `list`.
 
 ```bash
-# projects
-task project add --title "Launch v1" --description "Q3" \
-                 --start 2026-06-01 --end 2026-09-30 --stages 4
-task project list
-task project show 1
-task project update 1 --description "Pushed to Q4" --end 2026-12-15
-task project delete 1                                    # cascades to tasks
-
 # tasks
-task task add --project 1 --title "Wireframes" --description "" \
-              --status todo --assigned-to "Aarav" --stage 1 \
-              --start 2026-06-01 --end 2026-06-15
+task task add --title "Wireframes" --description "first cut" \
+              --status "To Do" --due 2026-06-15 --stage-id backlog
 task task list                                           # all
-task task list --project 1 --status in_progress          # filter
-task task show 1
-task task update 1 --status in_progress --assigned-to "Sam"
-task task delete 1
+task task list --status "In Progress"                    # filter by status
+task task show 1                                          # task + activity + comments
+task task update 1 --status "In Progress"                # logs a history entry
+task task delete 1                                        # cascades to activity/comments
+
+# comments
+task comment add --task 1 --text "kickoff call done"
+task comment list --task 1
+
+# activity history (auto-recorded on task updates)
+task activity list --task 1
 ```
 
-**Required flags** — `project add`: `--title --start --end --stages`. `task add`: `--project --title --stage --start --end`. Everything else has a default.
+**Required flags** — `task add`: `--title` only (everything else has a default). `comment add`: `--task --text`. `comment list` / `activity list`: `--task`. `--status` is free text (default `To Do`); `--assignee` takes a user id but is non-functional until users are reintroduced.
 
 **Errors** print as one clean line, no traceback (`task_cli/commands/*.py` catches `TaskCLIError` and calls `sys.exit(str(e))`):
 
 | Input | Result |
 |---|---|
-| `--end` before `--start` | `end date must be on or after start date` |
-| `--stage 99` on a 4-stage project | `Stage must be 1..4 for project #N` |
-| `--project 999` (nonexistent) | `Project #999 not found` |
+| `task show 999` (nonexistent) | `Task #999 not found` |
+| `comment add --task 999 ...` | `Task #999 not found` |
 | `update` with no fields | `Nothing to update. Provide at least one field.` |
 | Missing creds | `SUPABASE_URL and SUPABASE_KEY must be set` |
 
@@ -131,10 +145,10 @@ task task delete 1
 
 ## 4. MCP server (`task_mcp/`)
 
-`task_mcp/server.py` registers one MCP tool per `TaskCLI` method, with the same names as the methods (`add_project`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
+`task_mcp/server.py` registers one MCP tool per active `TaskCLI` method, with the same names as the methods (`add_task`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
 
-Tools exposed: `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`, `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`. Dates are ISO strings (`"YYYY-MM-DD"`); `status` is `"todo"`, `"in_progress"`, or `"done"`.
+Tools exposed: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`, `add_comment`, `list_comments`, `list_activities`. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). The `*_project` tools exist in the file but their `@mcp.tool()` decorators are commented out, so they are not exposed.
 
-Once configured in Claude Desktop, plain-English requests like *"list my projects"* or *"create a task in project 3 called Wireframes"* are routed to the matching tool.
+Once configured in Claude Desktop, plain-English requests like *"list my in-progress tasks"* or *"add a comment to task 3 saying the design is approved"* are routed to the matching tool.
 
 **Setup** — see [`SETUP.md`](./SETUP.md) Track B for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
