@@ -28,7 +28,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5000",
         "http://127.0.0.1:8000",
-        "flutter-task-beta.vercel.app",
+        "https://flutter-task-beta.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
