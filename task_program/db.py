@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
-from supabase import create_client, Client
+from surrealdb import Surreal
 
 _found = find_dotenv(usecwd=True)
 if _found:
@@ -14,9 +14,18 @@ else:
 
 
 @lru_cache(maxsize=1)
-def client() -> Client:
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY")
-    if not url or not key:
-        sys.exit("SUPABASE_URL and SUPABASE_KEY must be set (see .env.example)")
-    return create_client(url, key)
+def client() -> Surreal:
+    url = os.environ.get("SURREALDB_URL")
+    user = os.environ.get("SURREALDB_USER")
+    password = os.environ.get("SURREALDB_PASS")
+    namespace = os.environ.get("SURREALDB_NS", "main")
+    database = os.environ.get("SURREALDB_DB", "main")
+    if not url or not user or not password:
+        sys.exit(
+            "SURREALDB_URL, SURREALDB_USER and SURREALDB_PASS must be set "
+            "(see .env.example)"
+        )
+    db = Surreal(url)
+    db.signin({"username": user, "password": password})  # root credentials
+    db.use(namespace, database)
+    return db

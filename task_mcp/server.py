@@ -32,7 +32,7 @@ def add_task(
     title: str,
     description: Optional[str] = None,
     status: str = DEFAULT_STATUS,
-    assignee_id: Optional[int] = None,
+    assignee_id: Optional[str] = None,
     stage_id: Optional[str] = None,
     due: Optional[str] = None,
 ) -> dict | str:
@@ -61,7 +61,7 @@ def list_tasks(status: Optional[str] = None) -> list[dict] | str:
 
 
 @mcp.tool()
-def get_task(id: int) -> dict | str:
+def get_task(id: str) -> dict | str:
     """Fetch a single task by id, with its embedded activity history and comments."""
     try:
         return _api().get_task(id)
@@ -71,11 +71,11 @@ def get_task(id: int) -> dict | str:
 
 @mcp.tool()
 def update_task(
-    id: int,
+    id: str,
     title: Optional[str] = None,
     description: Optional[str] = None,
     status: Optional[str] = None,
-    assignee_id: Optional[int] = None,
+    assignee_id: Optional[str] = None,
     stage_id: Optional[str] = None,
     due: Optional[str] = None,
 ) -> dict | str:
@@ -96,7 +96,7 @@ def update_task(
 
 
 @mcp.tool()
-def delete_task(id: int) -> str:
+def delete_task(id: str) -> str:
     """Delete a task by id. Its activity history and comments are cascaded."""
     try:
         _api().delete_task(id)
@@ -109,7 +109,7 @@ def delete_task(id: int) -> str:
 
 
 @mcp.tool()
-def add_comment(task_id: int, text: str) -> dict | str:
+def add_comment(task_id: str, text: str) -> dict | str:
     """Add a comment to a task."""
     try:
         return _api().add_comment(task_id, text)
@@ -118,7 +118,7 @@ def add_comment(task_id: int, text: str) -> dict | str:
 
 
 @mcp.tool()
-def list_comments(task_id: int) -> list[dict] | str:
+def list_comments(task_id: str) -> list[dict] | str:
     """List a task's comments, oldest first."""
     try:
         return _api().list_comments(task_id)
@@ -127,7 +127,7 @@ def list_comments(task_id: int) -> list[dict] | str:
 
 
 @mcp.tool()
-def list_activities(task_id: int) -> list[dict] | str:
+def list_activities(task_id: str) -> list[dict] | str:
     """List a task's activity history (auto-recorded field changes), oldest first."""
     try:
         return _api().list_activities(task_id)
@@ -172,7 +172,7 @@ def list_projects() -> list[dict] | str:
 
 
 # @mcp.tool()
-def get_project(id: int) -> dict | str:
+def get_project(id: str) -> dict | str:
     """Fetch a single project by id."""
     try:
         return _api().get_project(id)
@@ -182,7 +182,7 @@ def get_project(id: int) -> dict | str:
 
 # @mcp.tool()
 def update_project(
-    id: int,
+    id: str,
     title: Optional[str] = None,
     description: Optional[str] = None,
     start: Optional[str] = None,
@@ -204,7 +204,7 @@ def update_project(
 
 
 # @mcp.tool()
-def delete_project(id: int) -> str:
+def delete_project(id: str) -> str:
     """Delete a project. All its tasks are cascaded."""
     try:
         _api().delete_project(id)

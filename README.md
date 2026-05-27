@@ -1,6 +1,6 @@
 # task
 
-A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activity history** and free-text **comments** — backed by Supabase Postgres. Built for [Coolmogo.ai](https://coolmogo.ai).
+A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activity history** and free-text **comments** — backed by SurrealDB. Built for [Coolmogo.ai](https://coolmogo.ai).
 
 > **Projects are shelved for now.** The projects table and all project code (dataclass, `TaskCLI` methods, CLI parser, MCP tools) remain in the repo as dead code to reintroduce later, but they are not wired into the active CLI/MCP surface. Tasks carry an optional `project_id`/`stage_id` but no project commands are exposed.
 
@@ -10,7 +10,7 @@ A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activ
 
 The repo is split into one execution layer and three clients that wrap it:
 
-- **`task_program/`** — execution layer. `TaskCLI` class + Supabase access. No CLI, MCP, or HTTP code.
+- **`task_program/`** — execution layer. `TaskCLI` class + SurrealDB access. No CLI, MCP, or HTTP code.
 - **`task_cli/`** — CLI client. Imports `TaskCLI` from `task_program`.
 - **`task_mcp/`** — MCP server client. Imports `TaskCLI` from `task_program`.
 - **`task_api/`** — FastAPI REST client. Imports `TaskCLI` from `task_program`.
@@ -25,48 +25,53 @@ flowchart LR
     cli --> api["task_program<br/><b>TaskCLI</b>"]
     mcp --> api
     rest --> api
-    api --> supabase[("Supabase Postgres")]
+    api --> surreal[("SurrealDB<br/>(Surreal Cloud)")]
 ```
 
-**Data model** — `tasks` plus `activities` (auto-recorded history) and `comments`, with a `users` table referenced by `assignee_id`/`author_id` as *dead structure* (no rows yet — user management isn't built, so assignee/authors stay null). `status` is free text (default `'To Do'`). Full DDL for fresh installs in [`schema.sql`](./schema.sql); to reshape an existing database use [`migration.sql`](./migration.sql) (destructive — see its header). Both paste into the Supabase SQL editor.
+**Data model** — `task` plus `activity` (auto-recorded history) and `comment`, with a `user` table referenced by `assignee`/`author` record links as *dead structure* (no records yet — user management isn't built, so assignee/authors stay null). `status` is free text (default `'To Do'`). Record ids are SurrealDB strings (e.g. `task:8f3k`), **not** auto-increment integers. Full schema for fresh installs in [`schema.surql`](./schema.surql); wipe all records (keeping the schema) with [`reset.surql`](./reset.surql). Import either by pasting into the Surrealist query editor (→ Run query) or via `surreal import`.
+
+SurrealDB tables are singular (`task`, `activity`, `comment`, `user`) and ids are
+string record ids. The execution layer normalizes the DB link fields (`assignee`,
+`task`, `author`) into the `*_id` string keys shown in the API/CLI output.
 
 ```mermaid
 erDiagram
-    users ||--o{ tasks : "assignee (dead)"
-    tasks ||--o{ activities : "has"
-    tasks ||--o{ comments : "has"
-    tasks {
-        int8 id PK
-        text title
-        text description
-        text status
-        date due_date
-        int8 assignee_id FK "dead, null"
-        text stage_id
-        int8 project_id FK "shelved, null"
+    user ||--o{ task : "assignee (dead)"
+    task ||--o{ activity : "has"
+    task ||--o{ comment : "has"
+    task {
+        string id PK "e.g. task:8f3k"
+        string title
+        string description
+        string status
+        string due_date "YYYY-MM-DD"
+        record assignee FK "dead, null"
+        string stage_id
+        record project FK "shelved, null"
+        datetime created_at
     }
-    activities {
-        int8 id PK
-        int8 task_id FK
-        text type "history|comment"
-        text action "updated|removed|assigned|moved|commented"
-        text field
-        text old_value
-        text new_value
-        text text
-        int8 author_id FK "dead, null"
-        timestamptz created_at
+    activity {
+        string id PK
+        record task FK
+        string type "history|comment"
+        string action "updated|removed|assigned|moved|commented"
+        string field
+        string old_value
+        string new_value
+        string text
+        record author FK "dead, null"
+        datetime created_at
     }
-    comments {
-        int8 id PK
-        int8 task_id FK
-        text text
-        int8 author_id FK "dead, null"
-        timestamptz created_at
+    comment {
+        string id PK
+        record task FK
+        string text
+        record author FK "dead, null"
+        datetime created_at
     }
 ```
 
-**Credentials** — copy `.env.example` to `.env` and fill in `SUPABASE_URL` and `SUPABASE_KEY`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat).
+**Credentials** — copy `.env.example` to `.env` and fill in `SURREALDB_URL`, `SURREALDB_USER` (root), and `SURREALDB_PASS`; `SURREALDB_NS`/`SURREALDB_DB` default to `main`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat). See [`DB_SETUP.md`](./DB_SETUP.md) for connecting to SurrealDB (URL schemes, getting the values, importing the schema, troubleshooting).
 
 **Setup** — see [`SETUP.md`](./SETUP.md) for step-by-step install instructions (one track for the CLI, one for the MCP server).
 
@@ -90,23 +95,23 @@ All methods return raw row dicts (or `list[dict]`). `due` accepts either `dateti
 ```python
 from task_program import TaskCLI, TaskCLIError
 
-api = TaskCLI()  # or TaskCLI(supabase_url=..., supabase_key=...)
+api = TaskCLI()  # or TaskCLI(url=..., username=..., password=..., namespace="main", database="main")
 
 t = api.add_task(title="Wireframes", description="first cut",
                  status="To Do", due="2026-06-15")
-api.update_task(t["id"], status="In Progress")   # logs a 'moved' activity
+api.update_task(t["id"], status="In Progress")   # logs a 'moved' activity; t["id"] is e.g. "task:8f3k"
 api.add_comment(t["id"], "kickoff call done")
 
 full = api.get_task(t["id"])
 print(full["status"], len(full["activities"]), len(full["comments"]))
 
 try:
-    api.get_task(999)
+    api.get_task("task:doesnotexist")
 except TaskCLIError as e:
-    print(e)  # "Task #999 not found"
+    print(e)  # "Task #task:doesnotexist not found"
 ```
 
-Supabase client is `lru_cache`d in `task_program/db.py` — built once per process. No ORM, no repository layer.
+The SurrealDB client is `lru_cache`d in `task_program/db.py` — connected and signed in once per process. No ORM, no repository layer.
 
 ---
 
@@ -120,28 +125,30 @@ task task add --title "Wireframes" --description "first cut" \
               --status "To Do" --due 2026-06-15 --stage-id backlog
 task task list                                           # all
 task task list --status "In Progress"                    # filter by status
-task task show 1                                          # task + activity + comments
-task task update 1 --status "In Progress"                # logs a history entry
-task task delete 1                                        # cascades to activity/comments
+task task show task:8f3k                                 # task + activity + comments
+task task update task:8f3k --status "In Progress"        # logs a history entry
+task task delete task:8f3k                               # cascades to activity/comments
 
 # comments
-task comment add --task 1 --text "kickoff call done"
-task comment list --task 1
+task comment add --task task:8f3k --text "kickoff call done"
+task comment list --task task:8f3k
 
 # activity history (auto-recorded on task updates)
-task activity list --task 1
+task activity list --task task:8f3k
 ```
 
-**Required flags** — `task add`: `--title` only (everything else has a default). `comment add`: `--task --text`. `comment list` / `activity list`: `--task`. `--status` is free text (default `To Do`); `--assignee` takes a user id but is non-functional until users are reintroduced.
+Ids are SurrealDB record ids (e.g. `task:8f3k`) — copy them from the `task add` / `task list` output; they are no longer auto-increment integers.
+
+**Required flags** — `task add`: `--title` only (everything else has a default). `comment add`: `--task --text`. `comment list` / `activity list`: `--task`. `--status` is free text (default `To Do`); `--assignee` takes a user record id but is non-functional until users are reintroduced.
 
 **Errors** print as one clean line, no traceback (`task_cli/commands/*.py` catches `TaskCLIError` and calls `sys.exit(str(e))`):
 
 | Input | Result |
 |---|---|
-| `task show 999` (nonexistent) | `Task #999 not found` |
-| `comment add --task 999 ...` | `Task #999 not found` |
+| `task show task:nope` (nonexistent) | `Task #task:nope not found` |
+| `comment add --task task:nope ...` | `Task #task:nope not found` |
 | `update` with no fields | `Nothing to update. Provide at least one field.` |
-| Missing creds | `SUPABASE_URL and SUPABASE_KEY must be set` |
+| Missing creds | `SURREALDB_URL, SURREALDB_USER and SURREALDB_PASS must be set` |
 
 ---
 
@@ -151,7 +158,7 @@ task activity list --task 1
 
 Tools exposed: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`, `add_comment`, `list_comments`, `list_activities`. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). The `*_project` tools exist in the file but their `@mcp.tool()` decorators are commented out, so they are not exposed.
 
-Once configured in Claude Desktop, plain-English requests like *"list my in-progress tasks"* or *"add a comment to task 3 saying the design is approved"* are routed to the matching tool.
+Once configured in Claude Desktop, plain-English requests like *"list my in-progress tasks"* or *"add a comment to that task saying the design is approved"* are routed to the matching tool. Task ids are record-id strings (e.g. `task:8f3k`), which Claude carries between tool calls.
 
 **Setup** — see [`SETUP.md`](./SETUP.md) Track B for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
 
@@ -159,7 +166,7 @@ Once configured in Claude Desktop, plain-English requests like *"list my in-prog
 
 ## 5. REST API (`task_api/`)
 
-`task_api/server.py` is a barebones [FastAPI](https://fastapi.tiangolo.com/) app — one route per active `TaskCLI` method. It's a peer of the CLI and MCP clients. `TaskCLIError` is translated to an HTTP error by a single exception handler: lookups that miss return **404**, validation failures return **400**, both with a `{"detail": "..."}` body. There is no auth — it binds to `127.0.0.1` for single-user local use, matching the RLS-disabled design.
+`task_api/server.py` is a barebones [FastAPI](https://fastapi.tiangolo.com/) app — one route per active `TaskCLI` method. It's a peer of the CLI and MCP clients. `TaskCLIError` is translated to an HTTP error by a single exception handler: lookups that miss return **404**, validation failures return **400**, both with a `{"detail": "..."}` body. There is no auth — it binds to `127.0.0.1` for single-user local use, matching the single-user, root-access design (the SurrealDB connection signs in as root, so no table permissions apply).
 
 **Install & run:**
 
@@ -193,16 +200,18 @@ curl -X POST http://127.0.0.1:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{"title": "Write report", "status": "In Progress", "due": "2026-06-01"}'
 
-# update one field (records a history entry)
-curl -X PATCH http://127.0.0.1:8000/tasks/1 \
+# update one field (records a history entry); the id is the record id from the create response
+curl -X PATCH http://127.0.0.1:8000/tasks/task:8f3k \
   -H "Content-Type: application/json" \
   -d '{"status": "Done"}'
 
 # fetch with embedded activities + comments
-curl http://127.0.0.1:8000/tasks/1
+curl http://127.0.0.1:8000/tasks/task:8f3k
 
 # add a comment
-curl -X POST http://127.0.0.1:8000/tasks/1/comments \
+curl -X POST http://127.0.0.1:8000/tasks/task:8f3k/comments \
   -H "Content-Type: application/json" \
   -d '{"text": "design approved"}'
 ```
+
+> **Record-id paths.** Task ids are SurrealDB strings like `task:8f3k`, returned by `POST /tasks`. They contain a colon; in a URL path that's fine as-is, but if your HTTP client encodes it, `%3A` also works (`/tasks/task%3A8f3k`).

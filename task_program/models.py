@@ -33,15 +33,15 @@ class User:
     """Minimal user record. Dead structure for now — no rows are created until
     user management is reincorporated."""
 
-    id: Optional[int]
+    id: Optional[str]
     name: str
     email: Optional[str] = None
 
 
 @dataclass
 class ActivityLog:
-    id: Optional[int]
-    task_id: int
+    id: Optional[str]
+    task_id: str
     type: ActivityType
     action: ActivityAction
     timestamp: datetime
@@ -49,29 +49,30 @@ class ActivityLog:
     field: Optional[str] = None
     old_value: Optional[str] = None
     new_value: Optional[str] = None
-    author_id: Optional[int] = None
+    author_id: Optional[str] = None
     legacy_author_name: Optional[str] = None
 
 
 @dataclass
 class Comment:
-    id: Optional[int]
-    task_id: int
+    id: Optional[str]
+    task_id: str
     text: str
     created_at: datetime
-    author_id: Optional[int] = None
+    author_id: Optional[str] = None
     legacy_author_name: Optional[str] = None
 
 
 @dataclass
 class Task:
-    id: Optional[int]
+    # SurrealDB record ids are strings, e.g. "task:8f3k" (not auto-increment ints).
+    id: Optional[str]
     title: str
     status: str = DEFAULT_STATUS
     description: Optional[str] = None
     due_date: Optional[date] = None
-    assignee_id: Optional[int] = None
-    project_id: Optional[int] = None
+    assignee_id: Optional[str] = None
+    project_id: Optional[str] = None
     stage_id: Optional[str] = None
     activities: list = field(default_factory=list)
     comments: list = field(default_factory=list)
@@ -82,7 +83,7 @@ class Task:
 
 @dataclass
 class Project:
-    id: Optional[int]
+    id: Optional[str]
     title: str
     description: str
     start_date: date

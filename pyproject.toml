@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "task"
 version = "0.1.0"
-description = "CLI + MCP clients over a shared task_program execution layer, backed by Supabase"
+description = "CLI + MCP clients over a shared task_program execution layer, backed by SurrealDB"
 requires-python = ">=3.10"
 dependencies = [
-  "supabase>=2.0",
+  "surrealdb>=2.0",
   "python-dotenv>=1.0",
 ]
 
