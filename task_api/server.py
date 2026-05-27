@@ -136,9 +136,15 @@ def list_activities(task_id: str) -> list[dict]:
 
 
 def main() -> None:
+    import os
+
     import uvicorn
 
-    uvicorn.run("task_api.server:app", host="127.0.0.1", port=8000, reload=False)
+    # Hosting platforms (Render, etc.) inject $PORT and probe 0.0.0.0; bind there
+    # when PORT is set. Locally (no PORT) keep the loopback-only default.
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+    uvicorn.run("task_api.server:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

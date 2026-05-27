@@ -166,7 +166,9 @@ Once configured in Claude Desktop, plain-English requests like *"list my in-prog
 
 ## 5. REST API (`task_api/`)
 
-`task_api/server.py` is a barebones [FastAPI](https://fastapi.tiangolo.com/) app — one route per active `TaskCLI` method. It's a peer of the CLI and MCP clients. `TaskCLIError` is translated to an HTTP error by a single exception handler: lookups that miss return **404**, validation failures return **400**, both with a `{"detail": "..."}` body. There is no auth — it binds to `127.0.0.1` for single-user local use, matching the single-user, root-access design (the SurrealDB connection signs in as root, so no table permissions apply).
+`task_api/server.py` is a barebones [FastAPI](https://fastapi.tiangolo.com/) app — one route per active `TaskCLI` method. It's a peer of the CLI and MCP clients. `TaskCLIError` is translated to an HTTP error by a single exception handler: lookups that miss return **404**, validation failures return **400**, both with a `{"detail": "..."}` body. There is no auth. Locally it binds to `127.0.0.1` (loopback-only) for single-user use, matching the single-user, root-access design (the SurrealDB connection signs in as root, so no table permissions apply). When a `$PORT` env var is set — as hosting platforms like Render do — it instead binds `0.0.0.0:$PORT` so the platform's health check can reach it; `HOST` can override the host explicitly.
+
+> **Deploying publicly?** The API has no authentication and talks to SurrealDB with root credentials, so a public `0.0.0.0` deploy exposes full read/write to anyone who can reach it. Put it behind an auth layer / network restriction, or keep it private, before exposing it to the internet.
 
 **Install & run:**
 
@@ -192,7 +194,7 @@ Interactive Swagger docs are at `http://127.0.0.1:8000/docs`.
 
 Write endpoints take a JSON body. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). On `PATCH`, only the fields present in the body change — omitted fields are left untouched.
 
-**Examples:**
+**Examples — curl (run in a terminal):**
 
 ```bash
 # create
@@ -215,3 +217,15 @@ curl -X POST http://127.0.0.1:8000/tasks/task:8f3k/comments \
 ```
 
 > **Record-id paths.** Task ids are SurrealDB strings like `task:8f3k`, returned by `POST /tasks`. They contain a colon; in a URL path that's fine as-is, but if your HTTP client encodes it, `%3A` also works (`/tasks/task%3A8f3k`).
+
+**Using Postman (or any GUI client):** the `curl` lines above are *shell commands* — don't paste a whole `curl …` line into the URL bar, or the `-H`/`-d`/`\` get treated as part of the path and you'll get `404 {"detail": "Not Found"}`. Instead set the request up by hand:
+
+1. **Method** — e.g. `POST`.
+2. **URL** — just the endpoint, e.g. `http://127.0.0.1:8000/tasks` (for `PATCH`/`GET` on one task, append the record id: `http://127.0.0.1:8000/tasks/task:8f3k`).
+3. **Body** — select **raw**, then **JSON** in the type dropdown (this sets `Content-Type: application/json` for you), and paste only the JSON object:
+   ```json
+   {"title": "Write report", "status": "In Progress", "due": "2026-06-01"}
+   ```
+4. **Send** — a successful create returns `201` with the new task (including its `id`).
+
+Shortcut: Postman's **Import** button accepts a pasted `curl …` command and fills in the method, URL, headers, and body automatically.
