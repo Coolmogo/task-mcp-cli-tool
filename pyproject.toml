@@ -14,7 +14,13 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
-api = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
+api = [
+  "fastapi>=0.110",
+  "google-genai>=1.0",
+  "openai>=1.30",
+  "pydantic-settings>=2.2",
+  "uvicorn[standard]>=0.29",
+]
 
 [project.scripts]
 task = "task_cli.cli:main"

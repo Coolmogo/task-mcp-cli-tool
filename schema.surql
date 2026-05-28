@@ -52,8 +52,11 @@ DEFINE FIELD IF NOT EXISTS created_at         ON activity TYPE datetime DEFAULT 
 DEFINE TABLE IF NOT EXISTS comment SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS task               ON comment TYPE record<task>;
 DEFINE FIELD IF NOT EXISTS text               ON comment TYPE string;
+DEFINE FIELD IF NOT EXISTS author_id          ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS author_type        ON comment TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS author             ON comment TYPE option<record<user>>;
 DEFINE FIELD IF NOT EXISTS legacy_author_name ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS metadata           ON comment TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at         ON comment TYPE datetime DEFAULT time::now();
 
 DEFINE INDEX IF NOT EXISTS activity_task ON activity FIELDS task;
