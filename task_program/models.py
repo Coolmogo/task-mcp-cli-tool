@@ -59,7 +59,9 @@ class Comment:
     task_id: str
     text: str
     created_at: datetime
-    author_id: Optional[str] = None
+    author_type: str = "user"
+    author_id: Optional[str] = "current_user"
+    metadata: Optional[dict] = None
     legacy_author_name: Optional[str] = None
 
 

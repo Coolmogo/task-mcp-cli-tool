@@ -62,7 +62,8 @@ _ACTIVITY_KEYS = (
     "old_value", "new_value", "text", "author_id", "legacy_author_name", "created_at",
 )
 _COMMENT_KEYS = (
-    "id", "task_id", "text", "author_id", "legacy_author_name", "created_at",
+    "id", "task_id", "text", "content", "author_id", "author_type",
+    "legacy_author_name", "created_at", "metadata",
 )
 _PROJECT_KEYS = (
     "id", "title", "description", "start_date", "end_date", "no_of_stages",
@@ -78,8 +79,47 @@ def _scalar(value):
 
 
 def _normalize(raw: dict, keys: tuple[str, ...]) -> dict:
-    renamed = {_LINK_RENAMES.get(k, k): _scalar(v) for k, v in raw.items()}
+    renamed: dict = {}
+    for key, value in raw.items():
+        normalized_key = _LINK_RENAMES.get(key, key)
+        renamed[normalized_key] = _scalar(value)
     return {k: renamed.get(k) for k in keys}
+
+
+def _normalize_comment(raw: dict) -> dict:
+    row = _normalize(raw, _COMMENT_KEYS)
+    if "author_id" in raw:
+        row["author_id"] = _scalar(raw.get("author_id"))
+    if "author_type" in raw:
+        row["author_type"] = _scalar(raw.get("author_type"))
+    if "metadata" in raw:
+        row["metadata"] = raw.get("metadata")
+    content = row.get("content") or row.get("text")
+    row["content"] = content
+    row["text"] = row.get("text") or content
+    row["author_type"] = row.get("author_type") or "user"
+    row["author_id"] = row.get("author_id") or "current_user"
+    return row
+
+
+def _normalize_task_context_status(status: Optional[str]) -> str:
+    normalized = (status or "").strip().lower().replace("-", " ").replace("_", " ")
+    if normalized in {"todo", "to do", "backlog"}:
+        return "todo"
+    if normalized in {"in progress", "inprogress", "doing"}:
+        return "in_progress"
+    if normalized in {"blocked", "on hold", "stuck"}:
+        return "blocked"
+    if normalized in {"done", "complete", "completed"}:
+        return "done"
+    return "todo"
+
+
+def _normalize_task_context_priority(priority: Optional[str]) -> str:
+    normalized = (priority or "").strip().lower()
+    if normalized in {"low", "medium", "high"}:
+        return normalized
+    return "medium"
 
 
 class TaskCLI:
@@ -90,6 +130,7 @@ class TaskCLI:
     TASKS = "task"
     ACTIVITIES = "activity"
     COMMENTS = "comment"
+    USERS = "user"
 
     def __init__(
         self,
@@ -122,11 +163,29 @@ class TaskCLI:
         except Exception:
             raise TaskCLIError(f"Task #{id} not found")
 
+    def _optional_rid(self, id) -> Optional[RecordID]:
+        if not id:
+            return None
+        try:
+            return self._rid(id)
+        except TaskCLIError:
+            return None
+
     def _get_task_row(self, id) -> dict:
         res = self._client.query("SELECT * FROM $t", {"t": self._rid(id)})
         if not res:
             raise TaskCLIError(f"Task #{id} not found")
         return _normalize(res[0], _TASK_KEYS)
+
+    def _get_user_row(self, id) -> Optional[dict]:
+        try:
+            rid = id if isinstance(id, RecordID) else RecordID.parse(str(id))
+        except Exception:
+            return None
+        res = self._client.query("SELECT * FROM $u", {"u": rid})
+        if not res:
+            return None
+        return res[0]
 
     @staticmethod
     def _stringify(value) -> Optional[str]:
@@ -163,6 +222,8 @@ class TaskCLI:
         due: Optional[DateLike] = None,
         project: Optional[str] = None,
     ) -> dict:
+        if assignee_id:
+            self.ensure_user(assignee_id)
         payload = {
             "title": title,
             "description": description,
@@ -208,7 +269,7 @@ class TaskCLI:
         raw = res[0]
         row = _normalize(raw, _TASK_KEYS)
         row["activities"] = [_normalize(a, _ACTIVITY_KEYS) for a in (raw.get("activities") or [])]
-        row["comments"] = [_normalize(c, _COMMENT_KEYS) for c in (raw.get("comments") or [])]
+        row["comments"] = [_normalize_comment(c) for c in (raw.get("comments") or [])]
         return row
 
     def update_task(
@@ -252,6 +313,8 @@ class TaskCLI:
         db_payload: dict = {}
         for field_key, new in changes.items():
             if field_key == "assignee_id":
+                if new:
+                    self.ensure_user(new)
                 db_payload["assignee"] = self._rid(new) if new else None
             elif field_key == "project_id":
                 db_payload["project"] = self._rid(new) if new else None
@@ -261,6 +324,24 @@ class TaskCLI:
             self._client.merge(rid, db_payload)
 
         return {**current, **provided}
+
+    # ---- users -------------------------------------------------------------
+
+    def ensure_user(
+        self,
+        user_id: str,
+        *,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> dict:
+        existing = self._get_user_row(user_id)
+        if existing:
+            return existing
+        payload = {
+            "name": name or user_id.split(":", 1)[-1].replace("_", " ").title(),
+            "email": email,
+        }
+        return self._client.create(self._rid(user_id), payload)
 
     def delete_task(self, id) -> None:
         self._get_task_row(id)  # validate it exists
@@ -272,22 +353,62 @@ class TaskCLI:
 
     # ---- comments -----------------------------------------------------------
 
-    def add_comment(self, task_id, text: str) -> dict:
+    def add_comment(
+        self,
+        task_id,
+        text: str,
+        *,
+        author_type: str = "user",
+        author_id: str = "current_user",
+        metadata: Optional[dict] = None,
+        legacy_author_name: Optional[str] = None,
+    ) -> dict:
         self._get_task_row(task_id)  # validate the task exists
         row = self._client.create(self.COMMENTS, {
             "task": self._rid(task_id),
             "text": text,
-            "author": None,
-            "legacy_author_name": None,
+            "author_id": author_id,
+            "author_type": author_type,
+            "author": self._optional_rid(author_id),
+            "legacy_author_name": legacy_author_name,
+            "metadata": metadata,
         })
-        return _normalize(row, _COMMENT_KEYS)
+        return _normalize_comment(row)
+
+    def create_comment(
+        self,
+        task_id,
+        content: str,
+        *,
+        author_type: str = "user",
+        author_id: str = "current_user",
+        metadata: Optional[dict] = None,
+        legacy_author_name: Optional[str] = None,
+    ) -> dict:
+        return self.add_comment(
+            task_id,
+            content,
+            author_type=author_type,
+            author_id=author_id,
+            metadata=metadata,
+            legacy_author_name=legacy_author_name,
+        )
 
     def list_comments(self, task_id) -> list[dict]:
         rows = self._client.query(
             "SELECT * FROM comment WHERE task = $t ORDER BY created_at",
             {"t": self._rid(task_id)},
         )
-        return [_normalize(r, _COMMENT_KEYS) for r in rows]
+        return [_normalize_comment(r) for r in rows]
+
+    def get_recent_comments_for_task(self, task_id, *, limit: int = 10) -> list[dict]:
+        rows = self._client.query(
+            "SELECT * FROM comment WHERE task = $t ORDER BY created_at DESC LIMIT $limit",
+            {"t": self._rid(task_id), "limit": limit},
+        )
+        normalized = [_normalize_comment(r) for r in rows]
+        normalized.reverse()
+        return normalized
 
     # ---- activities ---------------------------------------------------------
 
@@ -297,6 +418,60 @@ class TaskCLI:
             {"t": self._rid(task_id)},
         )
         return [_normalize(r, _ACTIVITY_KEYS) for r in rows]
+
+    def get_recent_activity_logs_for_task(self, task_id, *, limit: int = 10) -> list[dict]:
+        rows = self._client.query(
+            "SELECT * FROM activity WHERE task = $t ORDER BY created_at DESC LIMIT $limit",
+            {"t": self._rid(task_id), "limit": limit},
+        )
+        normalized = [_normalize(r, _ACTIVITY_KEYS) for r in rows]
+        normalized.reverse()
+        return normalized
+
+    def get_task_by_id(self, task_id) -> dict:
+        return self._get_task_row(task_id)
+
+    def build_task_context(
+        self,
+        task_id,
+        *,
+        comment_limit: int = 10,
+        activity_limit: int = 10,
+    ) -> dict:
+        task = self.get_task_by_id(task_id)
+        comments = self.get_recent_comments_for_task(task_id, limit=comment_limit)
+        activities = self.get_recent_activity_logs_for_task(task_id, limit=activity_limit)
+        return {
+            "task_id": task["id"],
+            "title": task["title"],
+            "description": task.get("description"),
+            "status": _normalize_task_context_status(task.get("status")),
+            "priority": _normalize_task_context_priority(task.get("priority")),
+            "assignee_name": None,
+            "comments": [
+                {
+                    "author_type": comment.get("author_type") or "user",
+                    "author_name": comment.get("legacy_author_name"),
+                    "content": comment.get("content") or "",
+                    "created_at": comment.get("created_at"),
+                }
+                for comment in comments
+            ],
+            "activity_logs": [
+                {
+                    "event_type": activity.get("action") or activity.get("type") or "history",
+                    "description": activity.get("text")
+                    or (
+                        f"{activity.get('field')} changed from "
+                        f"{activity.get('old_value')!r} to {activity.get('new_value')!r}"
+                        if activity.get("field")
+                        else None
+                    ),
+                    "created_at": activity.get("created_at"),
+                }
+                for activity in activities
+            ],
+        }
 
     # ---- projects (dead: reintroduce later) ---------------------------------
     # Projects are shelved. These methods still target the surviving `project`

@@ -5,6 +5,7 @@ Interactive docs at /docs.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import FastAPI
@@ -16,8 +17,27 @@ from pydantic import BaseModel
 from task_program import TaskCLI, TaskCLIError
 from task_program.models import DEFAULT_STATUS
 
+from .spark_agent import (
+    SPARK_AUTHOR_ID,
+    SPARK_AUTHOR_TYPE,
+    SPARK_USER_ID,
+    SPARK_USER_NAME,
+    SparkTrigger,
+    build_assignment_trigger,
+    build_comment_trigger,
+    is_spark_assignee,
+)
+from .schemas import (
+    AddTaskCommentRequest,
+    AddTaskCommentResponse,
+    TaskCommentResponse,
+    TaskContext,
+)
+from .spark_service import generate_spark_reply
+
 
 app = FastAPI(title="task")
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,10 +95,6 @@ class TaskUpdate(BaseModel):
     due: Optional[str] = None  # ISO YYYY-MM-DD
 
 
-class CommentCreate(BaseModel):
-    text: str
-
-
 # ---- task routes -----------------------------------------------------------
 
 
@@ -104,7 +120,15 @@ def get_task(id: str) -> dict:
 def update_task(id: str, body: TaskUpdate) -> dict:
     """Update one or more fields. Only the fields present in the body change;
     each changed field is auto-recorded in the task's activity history."""
-    return _api().update_task(id, **body.model_dump(exclude_unset=True))
+    before = _api().get_task_by_id(id)
+    updated = _api().update_task(id, **body.model_dump(exclude_unset=True))
+    spark_comment: TaskCommentResponse | None = None
+    if not is_spark_assignee(before.get("assignee_id")) and is_spark_assignee(updated.get("assignee_id")):
+        spark_comment = _maybe_generate_spark_comment(id, build_assignment_trigger(id))
+    return {
+        **updated,
+        "spark_comment": spark_comment.model_dump(mode="json") if spark_comment else None,
+    }
 
 
 @app.delete("/tasks/{id}")
@@ -117,10 +141,60 @@ def delete_task(id: str) -> dict:
 # ---- comment / activity routes ---------------------------------------------
 
 
-@app.post("/tasks/{task_id}/comments", status_code=201)
-def add_comment(task_id: str, body: CommentCreate) -> dict:
-    """Add a comment to a task."""
-    return _api().add_comment(task_id, body.text)
+def _to_task_comment_response(row: dict) -> TaskCommentResponse:
+    return TaskCommentResponse.model_validate(row)
+
+
+def _maybe_generate_spark_comment(task_id: str, trigger: SparkTrigger) -> TaskCommentResponse | None:
+    try:
+        _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
+        context = TaskContext.model_validate(_api().build_task_context(task_id))
+        if not is_spark_assignee(_api().get_task_by_id(task_id).get("assignee_id")):
+            return None
+
+        spark_reply = generate_spark_reply(context, trigger.prompt)
+        if spark_reply.confidence <= 0.0:
+            logger.warning("Spark returned fallback reply for task %s", task_id)
+            return None
+
+        row = _api().create_comment(
+            task_id,
+            spark_reply.message,
+            author_type=SPARK_AUTHOR_TYPE,
+            author_id=SPARK_AUTHOR_ID,
+            metadata={
+                **trigger.metadata,
+                "response_type": spark_reply.response_type,
+                "confidence": spark_reply.confidence,
+            },
+            legacy_author_name=SPARK_USER_NAME,
+        )
+        return _to_task_comment_response(row)
+    except Exception:
+        logger.exception("Spark failed for task %s", task_id)
+        return None
+
+
+@app.post("/tasks/{task_id}/comments", status_code=201, response_model=AddTaskCommentResponse)
+def add_comment(task_id: str, body: AddTaskCommentRequest) -> AddTaskCommentResponse:
+    """Add a comment to a task and optionally trigger Spark when assigned."""
+    user_comment = _to_task_comment_response(
+        _api().create_comment(
+            task_id,
+            body.content,
+            author_type="user",
+            author_id="current_user",
+        )
+    )
+
+    spark_comment: TaskCommentResponse | None = None
+    task = _api().get_task_by_id(task_id)
+    if is_spark_assignee(task.get("assignee_id")):
+        spark_comment = _maybe_generate_spark_comment(
+            task_id,
+            build_comment_trigger(task_id, user_comment.id, body.content),
+        )
+    return AddTaskCommentResponse(success=True, user_comment=user_comment, spark_comment=spark_comment)
 
 
 @app.get("/tasks/{task_id}/comments")
