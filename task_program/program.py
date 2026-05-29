@@ -68,6 +68,10 @@ _COMMENT_KEYS = (
 _PROJECT_KEYS = (
     "id", "title", "description", "start_date", "end_date", "no_of_stages",
 )
+_PROPOSAL_KEYS = (
+    "id", "task_id", "status", "title", "description",
+    "assignee_id", "stage_id", "created_task_id", "created_at",
+)
 
 
 def _scalar(value):
@@ -131,6 +135,7 @@ class TaskCLI:
     ACTIVITIES = "activity"
     COMMENTS = "comment"
     USERS = "user"
+    PROPOSALS = "proposal"
 
     def __init__(
         self,
@@ -394,6 +399,32 @@ class TaskCLI:
             legacy_author_name=legacy_author_name,
         )
 
+    def get_comment(self, comment_id: str) -> dict:
+        """Fetch a single comment by its full record ID (e.g. 'comment:abc')."""
+        try:
+            rid = RecordID.parse(comment_id)
+        except Exception:
+            raise TaskCLIError(f"Comment #{comment_id} not found")
+        res = self._client.query("SELECT * FROM $c", {"c": rid})
+        if not res:
+            raise TaskCLIError(f"Comment #{comment_id} not found")
+        return _normalize_comment(res[0])
+
+    def update_comment_metadata(self, comment_id: str, metadata: dict) -> dict:
+        """Merge new metadata into an existing comment record."""
+        try:
+            rid = RecordID.parse(comment_id)
+        except Exception:
+            raise TaskCLIError(f"Comment #{comment_id} not found")
+        res = self._client.query("SELECT * FROM $c", {"c": rid})
+        if not res:
+            raise TaskCLIError(f"Comment #{comment_id} not found")
+        existing = _normalize_comment(res[0])
+        current_meta = existing.get("metadata") or {}
+        merged_meta = {**current_meta, **metadata}
+        self._client.merge(rid, {"metadata": merged_meta})
+        return {**existing, "metadata": merged_meta}
+
     def list_comments(self, task_id) -> list[dict]:
         rows = self._client.query(
             "SELECT * FROM comment WHERE task = $t ORDER BY created_at",
@@ -472,6 +503,67 @@ class TaskCLI:
                 for activity in activities
             ],
         }
+
+    # ---- proposals ----------------------------------------------------------
+
+    def _proposal_rid(self, id) -> RecordID:
+        try:
+            return id if isinstance(id, RecordID) else RecordID.parse(str(id))
+        except Exception:
+            raise TaskCLIError(f"Proposal #{id} not found")
+
+    def _get_proposal_row(self, id) -> dict:
+        rid = self._proposal_rid(id)
+        res = self._client.query("SELECT * FROM $p", {"p": rid})
+        if not res:
+            raise TaskCLIError(f"Proposal #{id} not found")
+        return _normalize(res[0], _PROPOSAL_KEYS)
+
+    def create_proposal(
+        self,
+        task_id,
+        title: str,
+        description: Optional[str] = None,
+        *,
+        assignee_id: Optional[str] = None,
+        stage_id: Optional[str] = None,
+    ) -> dict:
+        self._get_task_row(task_id)  # validate task exists
+        row = self._client.create(self.PROPOSALS, {
+            "task": self._rid(task_id),
+            "status": "pending",
+            "title": title,
+            "description": description,
+            "assignee_id": assignee_id,
+            "stage_id": stage_id,
+            "created_task_id": None,
+        })
+        return _normalize(row, _PROPOSAL_KEYS)
+
+    def get_proposal(self, proposal_id) -> dict:
+        return self._get_proposal_row(proposal_id)
+
+    def accept_proposal(self, proposal_id) -> dict:
+        rid = self._proposal_rid(proposal_id)
+        proposal = self._get_proposal_row(proposal_id)
+        if proposal["status"] != "pending":
+            raise TaskCLIError(f"Proposal is already {proposal['status']}")
+        created = self.add_task(
+            proposal["title"],
+            description=proposal["description"],
+            assignee_id=proposal["assignee_id"],
+            stage_id=proposal["stage_id"],
+        )
+        self._client.merge(rid, {"status": "accepted", "created_task_id": created["id"]})
+        return {**proposal, "status": "accepted", "created_task_id": created["id"], "created_task": created}
+
+    def reject_proposal(self, proposal_id) -> dict:
+        rid = self._proposal_rid(proposal_id)
+        proposal = self._get_proposal_row(proposal_id)
+        if proposal["status"] != "pending":
+            raise TaskCLIError(f"Proposal is already {proposal['status']}")
+        self._client.merge(rid, {"status": "rejected"})
+        return {**proposal, "status": "rejected"}
 
     # ---- projects (dead: reintroduce later) ---------------------------------
     # Projects are shelved. These methods still target the surviving `project`

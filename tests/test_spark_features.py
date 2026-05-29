@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from task_api import server
 from task_api.spark_agent import SPARK_USER_ID, is_spark_assignee
-from task_api.schemas import SparkTaskReply, TaskContext
+from task_api.schemas import SparkCreateTaskProposal, SparkTaskAction, TaskContext
 from task_api.spark_service import generate_spark_reply
 from task_api.settings import SparkSettings
 from task_program import TaskCLIError
@@ -18,10 +18,18 @@ from task_program.program import (
 
 
 class FakeTaskProgram:
-    def __init__(self, *, fail_user_comment: bool = False, fail_spark_comment: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_user_comment: bool = False,
+        fail_spark_comment: bool = False,
+        fail_add_task: bool = False,
+    ) -> None:
         self.fail_user_comment = fail_user_comment
         self.fail_spark_comment = fail_spark_comment
+        self.fail_add_task = fail_add_task
         self.comments: list[dict] = []
+        self.created_tasks: list[dict] = []
         self.users: dict[str, dict] = {}
         self.task = {
             "id": "task:1",
@@ -48,6 +56,32 @@ class FakeTaskProgram:
         current = self.get_task_by_id(task_id)
         self.task.update(changes)
         return {**current, **changes}
+
+    def add_task(
+        self,
+        title: str,
+        *,
+        description: str | None = None,
+        status: str = "To Do",
+        assignee_id: str | None = None,
+        stage_id: str | None = None,
+        due: str | None = None,
+        project: str | None = None,
+    ) -> dict:
+        if self.fail_add_task:
+            raise RuntimeError("task creation failed")
+        row = {
+            "id": f"task:created{len(self.created_tasks) + 1}",
+            "title": title,
+            "description": description,
+            "status": status,
+            "assignee_id": assignee_id,
+            "stage_id": stage_id,
+            "project_id": project,
+            "created_at": "2026-05-28T10:01:00Z",
+        }
+        self.created_tasks.append(row)
+        return row
 
     def create_comment(
         self,
@@ -132,7 +166,7 @@ class SparkUtilityTests(unittest.TestCase):
                 settings=SparkSettings(openai_api_key="test-key"),
             )
 
-        self.assertEqual(reply.response_type, "clarification")
+        self.assertEqual(reply.action_type, "update")
         self.assertEqual(reply.confidence, 0.0)
 
     def test_generate_spark_reply_supports_google_provider(self) -> None:
@@ -148,7 +182,7 @@ class SparkUtilityTests(unittest.TestCase):
         )
 
         class FakeResponse:
-            text = '{"response_type":"summary","message":"Review the latest task notes.","confidence":0.72}'
+            text = '{"action_type":"update","message":"Review the latest task notes.","confidence":0.72}'
 
         class FakeModels:
             @staticmethod
@@ -168,7 +202,7 @@ class SparkUtilityTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(reply.response_type, "summary")
+        self.assertEqual(reply.action_type, "update")
         self.assertEqual(reply.confidence, 0.72)
 
 
@@ -191,8 +225,8 @@ class SparkRouteTests(unittest.TestCase):
     def test_comment_on_spark_assigned_task_returns_both_comments(self) -> None:
         fake_program = FakeTaskProgram()
         fake_program.task["assignee_id"] = SPARK_USER_ID
-        spark_reply = SparkTaskReply(
-            response_type="suggestion",
+        spark_reply = SparkTaskAction(
+            action_type="update",
             message="Confirm the requirements and move the task to in progress.",
             confidence=0.91,
         )
@@ -207,13 +241,14 @@ class SparkRouteTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["spark_comment"]["author_id"], SPARK_USER_ID)
         self.assertEqual(payload["spark_comment"]["metadata"]["triggered_by_comment_id"], "task_comment:1")
+        self.assertEqual(payload["spark_comment"]["metadata"]["action_type"], "update")
         self.assertEqual(len(fake_program.comments), 2)
         self.assertIn(SPARK_USER_ID, fake_program.users)
 
     def test_assigning_task_to_spark_generates_comment(self) -> None:
         fake_program = FakeTaskProgram()
-        spark_reply = SparkTaskReply(
-            response_type="answer",
+        spark_reply = SparkTaskAction(
+            action_type="update",
             message="I will review the task and suggest the next step.",
             confidence=0.85,
         )
@@ -230,6 +265,65 @@ class SparkRouteTests(unittest.TestCase):
         self.assertEqual(len(fake_program.comments), 1)
         self.assertEqual(fake_program.comments[0]["author_id"], SPARK_USER_ID)
         self.assertEqual(fake_program.comments[0]["metadata"]["triggered_by_type"], "assignment")
+        self.assertEqual(fake_program.comments[0]["metadata"]["action_type"], "update")
+
+    def test_spark_can_propose_followup_task(self) -> None:
+        fake_program = FakeTaskProgram()
+        fake_program.task["assignee_id"] = SPARK_USER_ID
+        spark_reply = SparkTaskAction(
+            action_type="propose",
+            message="I created a follow-up implementation task with the research details.",
+            confidence=0.93,
+            proposal=SparkCreateTaskProposal(
+                proposal_type="create_task",
+                title="Implement onboarding drop-off fix",
+                description="Use the research findings to implement the first onboarding improvement.",
+                assignee_id="current_user",
+                stage_id="implementation",
+            ),
+        )
+        with patch.object(server, "_api", return_value=fake_program):
+            with patch.object(server, "generate_spark_reply", return_value=spark_reply):
+                response = self.client.post(
+                    "/tasks/task:1/comments",
+                    json={"content": "Research this and create the implementation task for me."},
+                )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(payload["spark_comment"]["metadata"]["action_type"], "propose")
+        self.assertEqual(payload["spark_comment"]["metadata"]["proposal_type"], "create_task")
+        self.assertEqual(payload["spark_comment"]["metadata"]["created_task_id"], "task:created1")
+        self.assertEqual(fake_program.created_tasks[0]["title"], "Implement onboarding drop-off fix")
+        self.assertIsNone(fake_program.created_tasks[0]["assignee_id"])
+
+    def test_spark_task_proposal_failure_returns_user_comment_only(self) -> None:
+        fake_program = FakeTaskProgram(fail_add_task=True)
+        fake_program.task["assignee_id"] = SPARK_USER_ID
+        spark_reply = SparkTaskAction(
+            action_type="propose",
+            message="I created a follow-up implementation task with the research details.",
+            confidence=0.93,
+            proposal=SparkCreateTaskProposal(
+                proposal_type="create_task",
+                title="Implement onboarding drop-off fix",
+                description="Use the research findings to implement the first onboarding improvement.",
+                assignee_id="current_user",
+                stage_id="implementation",
+            ),
+        )
+        with patch.object(server, "_api", return_value=fake_program):
+            with patch.object(server, "generate_spark_reply", return_value=spark_reply):
+                response = self.client.post(
+                    "/tasks/task:1/comments",
+                    json={"content": "Research this and create the implementation task for me."},
+                )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertIsNone(payload["spark_comment"])
+        self.assertEqual(len(fake_program.comments), 1)
+        self.assertEqual(len(fake_program.created_tasks), 0)
 
     def test_user_comment_failure_returns_http_error(self) -> None:
         fake_program = FakeTaskProgram(fail_user_comment=True)
@@ -258,8 +352,8 @@ class SparkRouteTests(unittest.TestCase):
     def test_spark_comment_save_failure_returns_user_comment_only(self) -> None:
         fake_program = FakeTaskProgram(fail_spark_comment=True)
         fake_program.task["assignee_id"] = SPARK_USER_ID
-        spark_reply = SparkTaskReply(
-            response_type="summary",
+        spark_reply = SparkTaskAction(
+            action_type="update",
             message="This task needs a short summary.",
             confidence=0.8,
         )

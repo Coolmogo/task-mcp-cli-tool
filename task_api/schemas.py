@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,7 +25,7 @@ class TaskCommentResponse(BaseModel):
 class AddTaskCommentResponse(BaseModel):
     success: bool
     user_comment: TaskCommentResponse
-    spark_comment: TaskCommentResponse | None = None
+    spark_comments: list[TaskCommentResponse] = []
 
 
 class TaskContextComment(BaseModel):
@@ -52,7 +52,35 @@ class TaskContext(BaseModel):
     activity_logs: list[TaskActivityLogContext]
 
 
-class SparkTaskReply(BaseModel):
-    response_type: Literal["answer", "summary", "suggestion", "clarification"]
+class ProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    task_id: str
+    status: Literal["pending", "accepted", "rejected"]
+    title: str
+    description: Optional[str] = None
+    assignee_id: Optional[str] = None
+    stage_id: Optional[str] = None
+    created_task_id: Optional[str] = None
+    created_at: datetime
+
+
+class AcceptProposalResponse(BaseModel):
+    proposal: ProposalResponse
+    created_task: dict
+
+
+class SparkCreateTaskProposal(BaseModel):
+    proposal_type: Literal["create_task"]
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=5000)
+    assignee_id: str | None = None
+    stage_id: str | None = None
+
+
+class SparkTaskAction(BaseModel):
+    action_type: Literal["update", "propose"]
     message: str
     confidence: float = Field(ge=0.0, le=1.0)
+    proposal: SparkCreateTaskProposal | None = None

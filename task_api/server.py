@@ -28,8 +28,10 @@ from .spark_agent import (
     is_spark_assignee,
 )
 from .schemas import (
+    AcceptProposalResponse,
     AddTaskCommentRequest,
     AddTaskCommentResponse,
+    ProposalResponse,
     TaskCommentResponse,
     TaskContext,
 )
@@ -41,15 +43,8 @@ logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5000",
-        "http://localhost:8000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5000",
-        "http://127.0.0.1:8000",
-        "https://flutter-task-beta.vercel.app",
-    ],
+    allow_origins=["https://flutter-task-beta.vercel.app"],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -101,7 +96,11 @@ class TaskUpdate(BaseModel):
 @app.post("/tasks", status_code=201)
 def add_task(body: TaskCreate) -> dict:
     """Create a task. status is free text (default 'To Do'); due is ISO (YYYY-MM-DD)."""
-    return _api().add_task(**body.model_dump())
+    created = _api().add_task(**body.model_dump())
+    spark_comments: list[TaskCommentResponse] = []
+    if is_spark_assignee(created.get("assignee_id")):
+        spark_comments = _run_spark_sequence(created["id"], build_assignment_trigger(created["id"]))
+    return {**created, "spark_comments": [c.model_dump(mode="json") for c in spark_comments]}
 
 
 @app.get("/tasks")
@@ -122,12 +121,12 @@ def update_task(id: str, body: TaskUpdate) -> dict:
     each changed field is auto-recorded in the task's activity history."""
     before = _api().get_task_by_id(id)
     updated = _api().update_task(id, **body.model_dump(exclude_unset=True))
-    spark_comment: TaskCommentResponse | None = None
+    spark_comments: list[TaskCommentResponse] = []
     if not is_spark_assignee(before.get("assignee_id")) and is_spark_assignee(updated.get("assignee_id")):
-        spark_comment = _maybe_generate_spark_comment(id, build_assignment_trigger(id))
+        spark_comments = _run_spark_sequence(id, build_assignment_trigger(id))
     return {
         **updated,
-        "spark_comment": spark_comment.model_dump(mode="json") if spark_comment else None,
+        "spark_comments": [c.model_dump(mode="json") for c in spark_comments],
     }
 
 
@@ -145,34 +144,107 @@ def _to_task_comment_response(row: dict) -> TaskCommentResponse:
     return TaskCommentResponse.model_validate(row)
 
 
-def _maybe_generate_spark_comment(task_id: str, trigger: SparkTrigger) -> TaskCommentResponse | None:
+def _normalize_proposed_assignee_id(assignee_id: str | None) -> str | None:
+    if not assignee_id:
+        return None
+    if ":" not in assignee_id:
+        return None
+    return assignee_id
+
+
+def _create_pending_proposal(task_id: str, spark_reply) -> dict:
+    proposal = spark_reply.proposal
+    if proposal is None or proposal.proposal_type != "create_task":
+        raise ValueError("Unsupported Spark proposal")
+    return _api().create_proposal(
+        task_id,
+        proposal.title,
+        proposal.description,
+        assignee_id=_normalize_proposed_assignee_id(proposal.assignee_id),
+        stage_id=proposal.stage_id,
+    )
+
+
+def _post_spark_comment(task_id: str, content: str, metadata: dict | None = None) -> TaskCommentResponse:
+    row = _api().create_comment(
+        task_id,
+        content,
+        author_type=SPARK_AUTHOR_TYPE,
+        author_id=SPARK_AUTHOR_ID,
+        metadata=metadata,
+        legacy_author_name=SPARK_USER_NAME,
+    )
+    return _to_task_comment_response(row)
+
+
+def _run_spark_sequence(task_id: str, trigger: SparkTrigger) -> list[TaskCommentResponse]:
     try:
         _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
         context = TaskContext.model_validate(_api().build_task_context(task_id))
         if not is_spark_assignee(_api().get_task_by_id(task_id).get("assignee_id")):
-            return None
+            return []
 
+        logger.info("Generating Spark reply for task %s with trigger: %s", task_id, trigger.kind)
         spark_reply = generate_spark_reply(context, trigger.prompt)
+        logger.info(
+            "Spark reply generated: action_type=%s, confidence=%s, message=%s...",
+            spark_reply.action_type,
+            spark_reply.confidence,
+            spark_reply.message[:50] if spark_reply.message else "N/A"
+        )
         if spark_reply.confidence <= 0.0:
             logger.warning("Spark returned fallback reply for task %s", task_id)
-            return None
+            fallback_comment = _post_spark_comment(
+                task_id,
+                "I need more context to respond effectively. Can you clarify what you're asking?",
+                metadata={**trigger.metadata, "action_type": "update", "confidence": 0.0},
+            )
+            return [fallback_comment]
 
-        row = _api().create_comment(
+        base_metadata = {
+            **trigger.metadata,
+            "action_type": spark_reply.action_type,
+            "confidence": spark_reply.confidence,
+        }
+
+        if spark_reply.action_type == "propose":
+            # Step 1: acknowledge
+            ack = _post_spark_comment(
+                task_id,
+                "On it — researching now and will create an implementation task.",
+                metadata={**base_metadata, "action_type": "update"},
+            )
+
+            # Step 2: create proposal + post the proposal comment
+            pending = _create_pending_proposal(task_id, spark_reply)
+            proposal_metadata = {
+                **base_metadata,
+                "proposal_type": spark_reply.proposal.proposal_type if spark_reply.proposal else None,
+                "proposal_id": pending["id"],
+            }
+            proposal_comment = _post_spark_comment(task_id, spark_reply.message, metadata=proposal_metadata)
+
+            # Step 3: confirm
+            confirm = _post_spark_comment(
+                task_id,
+                f"Done — I've created \"{pending['title']}\" with full implementation details. Accept the proposal above to add it to the board.",
+                metadata={**base_metadata, "action_type": "update"},
+            )
+
+            return [ack, proposal_comment, confirm]
+
+        # Single update comment
+        update_comment = _post_spark_comment(task_id, spark_reply.message, metadata=base_metadata)
+        return [update_comment]
+
+    except Exception as exc:
+        logger.exception("Spark failed for task %s: %s", task_id, str(exc))
+        fallback_comment = _post_spark_comment(
             task_id,
-            spark_reply.message,
-            author_type=SPARK_AUTHOR_TYPE,
-            author_id=SPARK_AUTHOR_ID,
-            metadata={
-                **trigger.metadata,
-                "response_type": spark_reply.response_type,
-                "confidence": spark_reply.confidence,
-            },
-            legacy_author_name=SPARK_USER_NAME,
+            f"I ran into an issue: {str(exc)[:100]}. Please check the logs.",
+            metadata={**trigger.metadata, "error": True, "action_type": "update", "error_detail": str(exc)},
         )
-        return _to_task_comment_response(row)
-    except Exception:
-        logger.exception("Spark failed for task %s", task_id)
-        return None
+        return [fallback_comment]
 
 
 @app.post("/tasks/{task_id}/comments", status_code=201, response_model=AddTaskCommentResponse)
@@ -187,14 +259,14 @@ def add_comment(task_id: str, body: AddTaskCommentRequest) -> AddTaskCommentResp
         )
     )
 
-    spark_comment: TaskCommentResponse | None = None
+    spark_comments: list[TaskCommentResponse] = []
     task = _api().get_task_by_id(task_id)
     if is_spark_assignee(task.get("assignee_id")):
-        spark_comment = _maybe_generate_spark_comment(
+        spark_comments = _run_spark_sequence(
             task_id,
             build_comment_trigger(task_id, user_comment.id, body.content),
         )
-    return AddTaskCommentResponse(success=True, user_comment=user_comment, spark_comment=spark_comment)
+    return AddTaskCommentResponse(success=True, user_comment=user_comment, spark_comments=spark_comments)
 
 
 @app.get("/tasks/{task_id}/comments")
@@ -207,6 +279,31 @@ def list_comments(task_id: str) -> list[dict]:
 def list_activities(task_id: str) -> list[dict]:
     """List a task's activity history (auto-recorded field changes), oldest first."""
     return _api().list_activities(task_id)
+
+
+# ---- proposal routes -------------------------------------------------------
+
+
+@app.get("/proposals/{proposal_id}", response_model=ProposalResponse)
+def get_proposal(proposal_id: str) -> ProposalResponse:
+    """Fetch a pending or resolved proposal by id."""
+    return ProposalResponse.model_validate(_api().get_proposal(proposal_id))
+
+
+@app.post("/proposals/{proposal_id}/accept", response_model=AcceptProposalResponse)
+def accept_proposal(proposal_id: str) -> AcceptProposalResponse:
+    """Accept a pending proposal: creates the task and marks the proposal accepted."""
+    result = _api().accept_proposal(proposal_id)
+    return AcceptProposalResponse(
+        proposal=ProposalResponse.model_validate(result),
+        created_task=result["created_task"],
+    )
+
+
+@app.post("/proposals/{proposal_id}/reject", response_model=ProposalResponse)
+def reject_proposal(proposal_id: str) -> ProposalResponse:
+    """Reject a pending proposal without creating a task."""
+    return ProposalResponse.model_validate(_api().reject_proposal(proposal_id))
 
 
 def main() -> None:

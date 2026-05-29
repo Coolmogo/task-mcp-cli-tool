@@ -28,7 +28,7 @@ flowchart LR
     api --> surreal[("SurrealDB<br/>(Surreal Cloud)")]
 ```
 
-**Data model** — `task` plus `activity` (auto-recorded history) and `comment`, with a `user` table referenced by `assignee`/`author` record links as *dead structure* (no records yet — user management isn't built, so assignee/authors stay null). `status` is free text (default `'To Do'`). Record ids are SurrealDB strings (e.g. `task:8f3k`), **not** auto-increment integers. Full schema for fresh installs in [`schema.surql`](./schema.surql); wipe all records (keeping the schema) with [`reset.surql`](./reset.surql). Import either by pasting into the Surrealist query editor (→ Run query) or via `surreal import`.
+**Data model** — `task` plus `activity` (auto-recorded history) and `comment`, with a `user` table referenced by `assignee`/`author` record links. `status` is free text (default `'To Do'`). Record ids are SurrealDB strings (e.g. `task:8f3k`), **not** auto-increment integers. Full schema for fresh installs in [`schema.surql`](./schema.surql); wipe all records (keeping the schema) with [`reset.surql`](./reset.surql). Import either by pasting into the Surrealist query editor (→ Run query) or via `surreal import`.
 
 SurrealDB tables are singular (`task`, `activity`, `comment`, `user`) and ids are
 string record ids. The execution layer normalizes the DB link fields (`assignee`,
@@ -173,7 +173,7 @@ Once configured in Claude Desktop, plain-English requests like *"list my in-prog
 **Install & run:**
 
 ```bash
-pip install -e ".[api]"     # adds fastapi + uvicorn
+pip install -e ".[api]"     # adds fastapi + uvicorn + OpenAI API deps
 python -m task_api          # serves on http://127.0.0.1:8000
 ```
 
@@ -188,11 +188,11 @@ Interactive Swagger docs are at `http://127.0.0.1:8000/docs`.
 | `GET    /tasks/{id}`                 | Fetch one task with embedded `activities`+`comments`|
 | `PATCH  /tasks/{id}`                 | Update sent fields only (auto-logs history)         |
 | `DELETE /tasks/{id}`                 | Delete a task (history + comments cascade)          |
-| `POST   /tasks/{task_id}/comments`   | Add a comment (JSON body `{"text": "..."}`)         |
+| `POST   /tasks/{task_id}/comments`   | Add a comment and optionally trigger Spark          |
 | `GET    /tasks/{task_id}/comments`   | List a task's comments, oldest first                |
 | `GET    /tasks/{task_id}/activities` | List a task's activity history, oldest first        |
 
-Write endpoints take a JSON body. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). On `PATCH`, only the fields present in the body change — omitted fields are left untouched.
+Write endpoints take a JSON body. `POST /tasks/{task_id}/comments` now expects `{"content": "..."}` and triggers Spark only when the task is currently assigned to Spark. Assigning a task to `user:spark` also triggers Spark's first turn. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). On `PATCH`, only the fields present in the body change — omitted fields are left untouched.
 
 **Examples — curl (run in a terminal):**
 
@@ -213,7 +213,7 @@ curl http://127.0.0.1:8000/tasks/task:8f3k
 # add a comment
 curl -X POST http://127.0.0.1:8000/tasks/task:8f3k/comments \
   -H "Content-Type: application/json" \
-  -d '{"text": "design approved"}'
+  -d '{"content": "design approved"}'
 ```
 
 > **Record-id paths.** Task ids are SurrealDB strings like `task:8f3k`, returned by `POST /tasks`. They contain a colon; in a URL path that's fine as-is, but if your HTTP client encodes it, `%3A` also works (`/tasks/task%3A8f3k`).
@@ -229,3 +229,18 @@ curl -X POST http://127.0.0.1:8000/tasks/task:8f3k/comments \
 4. **Send** — a successful create returns `201` with the new task (including its `id`).
 
 Shortcut: Postman's **Import** button accepts a pasted `curl …` command and fills in the method, URL, headers, and body automatically.
+
+### Spark MVP note
+
+1. Set either `OPENAI_API_KEY` or `GOOGLE_API_KEY` in the backend environment or `.env`, and choose `SPARK_LLM_PROVIDER=openai` or `SPARK_LLM_PROVIDER=google`.
+2. Install the API extras with `pip install -e ".[api]"`.
+3. Start the API with `python -m task_api`.
+4. Assign the task to Spark with `{"assignee_id": "user:spark"}` on `PATCH /tasks/{task_id}`.
+5. POST to `/tasks/{task_id}/comments` with:
+
+```json
+{"content": "Summarize this task"}
+```
+
+6. Confirm the user comment is saved.
+7. Confirm Spark's reply is saved as a second task comment when generation succeeds.

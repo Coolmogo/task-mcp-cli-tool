@@ -80,6 +80,18 @@ class Task:
     comments: list = field(default_factory=list)
 
 
+@dataclass
+class Proposal:
+    id: Optional[str]
+    task_id: str
+    status: str  # pending | accepted | rejected
+    title: str
+    description: Optional[str] = None
+    assignee_id: Optional[str] = None
+    stage_id: Optional[str] = None
+    created_task_id: Optional[str] = None
+
+
 # ---- dead: reintroduce with projects later ---------------------------------
 
 

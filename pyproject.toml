@@ -15,9 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.0"]
 api = [
+  "ddgs>=4.0",
   "fastapi>=0.110",
   "google-genai>=1.0",
-  "openai>=1.30",
   "pydantic-settings>=2.2",
   "uvicorn[standard]>=0.29",
 ]

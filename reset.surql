@@ -5,6 +5,7 @@
 
 DELETE comment;
 DELETE activity;
+DELETE proposal;
 DELETE task;
 DELETE project;
 DELETE user;

@@ -13,9 +13,6 @@ class SparkSettings(BaseSettings):
         extra="ignore",
     )
 
-    spark_llm_provider: Literal["openai", "google"] = "openai"
-    openai_api_key: str | None = None
-    openai_model: str = "gpt-4.1-mini"
     google_api_key: str | None = None
     google_model: str = "gemini-2.5-flash"
 

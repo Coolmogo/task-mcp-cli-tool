@@ -57,7 +57,30 @@ DEFINE FIELD IF NOT EXISTS author_type        ON comment TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS author             ON comment TYPE option<record<user>>;
 DEFINE FIELD IF NOT EXISTS legacy_author_name ON comment TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS metadata           ON comment TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS metadata.action_type             ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS metadata.confidence              ON comment TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS metadata.triggered_by_comment_id ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS metadata.triggered_by_type       ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS metadata.task_id                 ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS metadata.proposal_type           ON comment TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS metadata.created_task_id         ON comment TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at         ON comment TYPE datetime DEFAULT time::now();
+
+DEFINE FIELD IF NOT EXISTS metadata.proposal_id ON comment TYPE option<string>;
 
 DEFINE INDEX IF NOT EXISTS activity_task ON activity FIELDS task;
 DEFINE INDEX IF NOT EXISTS comment_task  ON comment  FIELDS task;
+
+-- Pending proposals created by Spark. Users accept or reject them before a task
+-- is created. status: pending | accepted | rejected.
+DEFINE TABLE IF NOT EXISTS proposal SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS task            ON proposal TYPE record<task>;
+DEFINE FIELD IF NOT EXISTS status          ON proposal TYPE string DEFAULT 'pending';
+DEFINE FIELD IF NOT EXISTS title           ON proposal TYPE string;
+DEFINE FIELD IF NOT EXISTS description     ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS assignee_id     ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS stage_id        ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_task_id ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at      ON proposal TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX IF NOT EXISTS proposal_task ON proposal FIELDS task;
