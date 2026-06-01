@@ -6,6 +6,7 @@ from task_program.models import DEFAULT_STATUS
 from .commands import activity as activity_cmd
 from .commands import comment as comment_cmd
 from .commands import project as project_cmd  # noqa: F401  (dead: reintroduce later)
+from .commands import proposal as proposal_cmd
 from .commands import task as task_cmd
 
 
@@ -102,6 +103,36 @@ def _build_comment_parser(sub: argparse._SubParsersAction) -> None:
     lst.set_defaults(func=comment_cmd.list_)
 
 
+def _build_proposal_parser(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("proposal", help="Manage task proposals (AI-suggested tasks)")
+    verbs = p.add_subparsers(dest="verb", required=True)
+
+    add = verbs.add_parser("add", help="Add a proposal to a task")
+    add.add_argument("--task", required=True, help="Task ID")
+    add.add_argument("--title", required=True)
+    add.add_argument("--description", default=None)
+    add.add_argument("--status", default=DEFAULT_STATUS, help=f"free text (default {DEFAULT_STATUS!r})")
+    add.add_argument("--stage-id", dest="stage_id", default=None)
+    add.add_argument("--assignee", dest="assignee_id", default=None, help="user record id, e.g. user:abc")
+    add.set_defaults(func=proposal_cmd.add)
+
+    lst = verbs.add_parser("list", help="List a task's proposals")
+    lst.add_argument("--task", required=True, help="Task ID")
+    lst.set_defaults(func=proposal_cmd.list_)
+
+    show = verbs.add_parser("show", help="Show one proposal")
+    show.add_argument("id")
+    show.set_defaults(func=proposal_cmd.show)
+
+    acc = verbs.add_parser("accept", help="Accept a proposal (creates a task from it)")
+    acc.add_argument("id")
+    acc.set_defaults(func=proposal_cmd.accept)
+
+    dele = verbs.add_parser("delete", help="Delete a proposal")
+    dele.add_argument("id")
+    dele.set_defaults(func=proposal_cmd.delete)
+
+
 def _build_activity_parser(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("activity", help="View a task's activity history")
     verbs = p.add_subparsers(dest="verb", required=True)
@@ -119,6 +150,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="entity", required=True)
     _build_task_parser(sub)
     _build_comment_parser(sub)
+    _build_proposal_parser(sub)
     _build_activity_parser(sub)
 
     args = parser.parse_args()

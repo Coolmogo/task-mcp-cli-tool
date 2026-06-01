@@ -35,7 +35,12 @@ DEFINE FIELD IF NOT EXISTS stage_id    ON task TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS project     ON task TYPE option<record<project>>;
 DEFINE FIELD IF NOT EXISTS created_at  ON task TYPE datetime DEFAULT time::now();
 
--- Auto-recorded activity history. One row per changed task field (see program.py).
+-- The activity feed is the PARENT / wrapper over its subtypes. `type` discriminates:
+--   'history'  -> auto-recorded field change (one row per changed task field; see program.py)
+--   'comment'  -> wraps a `comment` child row (action 'commented')
+--   'proposal' -> wraps a `proposal` child row (action 'proposed')
+-- Subtype detail (text, proposed task fields) lives on the child, which points UP
+-- here via its `activity` link. The 'update' subtype is deferred.
 DEFINE TABLE IF NOT EXISTS activity SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS task               ON activity TYPE record<task>;
 DEFINE FIELD IF NOT EXISTS type               ON activity TYPE string DEFAULT 'history';
@@ -48,13 +53,33 @@ DEFINE FIELD IF NOT EXISTS author             ON activity TYPE option<record<use
 DEFINE FIELD IF NOT EXISTS legacy_author_name ON activity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at         ON activity TYPE datetime DEFAULT time::now();
 
--- Free-text comments. Never auto-logged; added only via add_comment.
+-- Free-text comments. Never auto-logged; added only via add_comment, which also
+-- creates the parent activity wrapper this row points up to.
 DEFINE TABLE IF NOT EXISTS comment SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS task               ON comment TYPE record<task>;
+DEFINE FIELD IF NOT EXISTS activity           ON comment TYPE option<record<activity>>;
 DEFINE FIELD IF NOT EXISTS text               ON comment TYPE string;
 DEFINE FIELD IF NOT EXISTS author             ON comment TYPE option<record<user>>;
 DEFINE FIELD IF NOT EXISTS legacy_author_name ON comment TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS created_at         ON comment TYPE datetime DEFAULT time::now();
 
-DEFINE INDEX IF NOT EXISTS activity_task ON activity FIELDS task;
-DEFINE INDEX IF NOT EXISTS comment_task  ON comment  FIELDS task;
+-- Proposals: an AI agent's suggested task (the suggest->complete loop). Points to
+-- the task it concerns AND up to its parent activity wrapper. accept_proposal
+-- spawns a real task and records its id in created_task_id. assignee_id /
+-- created_task_id are plain id strings (not record links), matching the client contract.
+DEFINE TABLE IF NOT EXISTS proposal SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS task            ON proposal TYPE record<task>;
+DEFINE FIELD IF NOT EXISTS activity        ON proposal TYPE option<record<activity>>;
+DEFINE FIELD IF NOT EXISTS title           ON proposal TYPE string;
+DEFINE FIELD IF NOT EXISTS description     ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status          ON proposal TYPE string DEFAULT 'To Do';
+DEFINE FIELD IF NOT EXISTS stage_id        ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS assignee_id     ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_task_id ON proposal TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at      ON proposal TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX IF NOT EXISTS activity_task     ON activity FIELDS task;
+DEFINE INDEX IF NOT EXISTS comment_task      ON comment  FIELDS task;
+DEFINE INDEX IF NOT EXISTS comment_activity  ON comment  FIELDS activity;
+DEFINE INDEX IF NOT EXISTS proposal_task     ON proposal FIELDS task;
+DEFINE INDEX IF NOT EXISTS proposal_activity ON proposal FIELDS activity;

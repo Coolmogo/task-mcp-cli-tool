@@ -128,9 +128,77 @@ def list_comments(task_id: str) -> list[dict] | str:
 
 @mcp.tool()
 def list_activities(task_id: str) -> list[dict] | str:
-    """List a task's activity history (auto-recorded field changes), oldest first."""
+    """List a task's activity feed (auto-recorded field changes plus comment and
+    proposal wrapper entries), oldest first."""
     try:
         return _api().list_activities(task_id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+# ---- proposal tools --------------------------------------------------------
+# A proposal is an AI agent's suggested task. Accepting one spawns a real task.
+
+
+@mcp.tool()
+def add_proposal(
+    task_id: str,
+    title: str,
+    description: Optional[str] = None,
+    status: str = DEFAULT_STATUS,
+    stage_id: Optional[str] = None,
+    assignee_id: Optional[str] = None,
+) -> dict | str:
+    """Propose a task for an existing task. status is free text (default 'To Do').
+    assignee_id references a user (user management is not wired up yet, leave null).
+    Use accept_proposal to turn the proposal into a real task."""
+    try:
+        return _api().add_proposal(
+            task_id,
+            title,
+            description=description,
+            status=status,
+            stage_id=stage_id,
+            assignee_id=assignee_id,
+        )
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def list_proposals(task_id: str) -> list[dict] | str:
+    """List a task's proposals, oldest first."""
+    try:
+        return _api().list_proposals(task_id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def get_proposal(id: str) -> dict | str:
+    """Fetch a single proposal by id."""
+    try:
+        return _api().get_proposal(id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def accept_proposal(id: str) -> dict | str:
+    """Accept a proposal: create a real task from its fields and record the new
+    task's id on the proposal (created_task_id). Returns the created task."""
+    try:
+        return _api().accept_proposal(id)
+    except TaskCLIError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def delete_proposal(id: str) -> str:
+    """Delete a proposal by id (also removes its activity wrapper)."""
+    try:
+        _api().delete_proposal(id)
+        return f"Deleted proposal #{id}"
     except TaskCLIError as e:
         return f"Error: {e}"
 

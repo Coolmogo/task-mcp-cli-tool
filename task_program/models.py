@@ -18,10 +18,12 @@ class Status(str, Enum):
 class ActivityType(str, Enum):
     COMMENT = "comment"
     HISTORY = "history"
+    PROPOSAL = "proposal"
 
 
 class ActivityAction(str, Enum):
     COMMENTED = "commented"
+    PROPOSED = "proposed"
     UPDATED = "updated"
     REMOVED = "removed"
     ASSIGNED = "assigned"
@@ -59,8 +61,27 @@ class Comment:
     task_id: str
     text: str
     created_at: datetime
+    activity_id: Optional[str] = None  # parent activity wrapper this comment points up to
     author_id: Optional[str] = None
     legacy_author_name: Optional[str] = None
+
+
+@dataclass
+class Proposal:
+    """An AI agent's suggested task. Points to the task it concerns and up to its
+    parent activity wrapper. accept_proposal spawns a real task and records its id
+    in created_task_id."""
+
+    id: Optional[str]
+    task_id: str
+    title: str
+    status: str = DEFAULT_STATUS
+    description: Optional[str] = None
+    stage_id: Optional[str] = None
+    assignee_id: Optional[str] = None
+    created_task_id: Optional[str] = None
+    activity_id: Optional[str] = None
+    created_at: Optional[datetime] = None
 
 
 @dataclass

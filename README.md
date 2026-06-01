@@ -1,6 +1,6 @@
 # task
 
-A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activity history** and free-text **comments** — backed by SurrealDB. Built for [Coolmogo.ai](https://coolmogo.ai).
+A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activity history**, free-text **comments**, and AI-suggested **proposals** — backed by SurrealDB. Built for [Coolmogo.ai](https://coolmogo.ai).
 
 > **Projects are shelved for now.** The projects table and all project code (dataclass, `TaskCLI` methods, CLI parser, MCP tools) remain in the repo as dead code to reintroduce later, but they are not wired into the active CLI/MCP surface. Tasks carry an optional `project_id`/`stage_id` but no project commands are exposed.
 
@@ -28,17 +28,21 @@ flowchart LR
     api --> surreal[("SurrealDB<br/>(Surreal Cloud)")]
 ```
 
-**Data model** — `task` plus `activity` (auto-recorded history) and `comment`, with a `user` table referenced by `assignee`/`author` record links as *dead structure* (no records yet — user management isn't built, so assignee/authors stay null). `status` is free text (default `'To Do'`). Record ids are SurrealDB strings (e.g. `task:8f3k`), **not** auto-increment integers. Full schema for fresh installs in [`schema.surql`](./schema.surql); wipe all records (keeping the schema) with [`reset.surql`](./reset.surql). Import either by pasting into the Surrealist query editor (→ Run query) or via `surreal import`.
+**Data model** — `task` plus an **`activity` feed that is the parent/wrapper over its subtypes**: each `comment` and each `proposal` has a 1:1 parent `activity` row (carrying the shared `task`/`author`/`type`/timestamp) and points *up* to it via an `activity` link; subtype detail (comment text, proposed task fields) lives on the child. `activity.type` is `history` (auto-recorded field change), `comment`, or `proposal`. A `user` table is referenced by `assignee`/`author` record links as *dead structure* (no records yet — user management isn't built, so assignee/authors stay null). `status` is free text (default `'To Do'`). Record ids are SurrealDB strings (e.g. `task:8f3k`), **not** auto-increment integers. Full schema for fresh installs in [`schema.surql`](./schema.surql); wipe all records (keeping the schema) with [`reset.surql`](./reset.surql). Import either by pasting into the Surrealist query editor (→ Run query) or via `surreal import`.
 
-SurrealDB tables are singular (`task`, `activity`, `comment`, `user`) and ids are
-string record ids. The execution layer normalizes the DB link fields (`assignee`,
-`task`, `author`) into the `*_id` string keys shown in the API/CLI output.
+SurrealDB tables are singular (`task`, `activity`, `comment`, `proposal`, `user`)
+and ids are string record ids. The execution layer normalizes the DB link fields
+(`assignee`, `task`, `author`, `activity`) into the `*_id` string keys shown in the
+API/CLI output.
 
 ```mermaid
 erDiagram
     user ||--o{ task : "assignee (dead)"
     task ||--o{ activity : "has"
     task ||--o{ comment : "has"
+    task ||--o{ proposal : "has"
+    activity ||--o| comment : "wraps"
+    activity ||--o| proposal : "wraps"
     task {
         string id PK "e.g. task:8f3k"
         string title
@@ -53,8 +57,8 @@ erDiagram
     activity {
         string id PK
         record task FK
-        string type "history|comment"
-        string action "updated|removed|assigned|moved|commented"
+        string type "history|comment|proposal"
+        string action "updated|removed|assigned|moved|commented|proposed"
         string field
         string old_value
         string new_value
@@ -65,8 +69,21 @@ erDiagram
     comment {
         string id PK
         record task FK
+        record activity FK "parent wrapper"
         string text
         record author FK "dead, null"
+        datetime created_at
+    }
+    proposal {
+        string id PK
+        record task FK
+        record activity FK "parent wrapper"
+        string title
+        string description
+        string status
+        string stage_id
+        string assignee_id
+        string created_task_id "set on accept"
         datetime created_at
     }
 ```
@@ -85,12 +102,13 @@ erDiagram
 - `TaskCLI` — one method per verb:
   - Tasks: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`
   - Comments: `add_comment`, `list_comments`
+  - Proposals: `add_proposal`, `list_proposals`, `get_proposal`, `accept_proposal`, `delete_proposal`
   - Activities: `list_activities`
   - Projects (dead, kept for later): `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
 
 All methods return raw row dicts (or `list[dict]`). `due` accepts either `datetime.date` or an ISO string (`"2026-06-01"`); `status` is any string (default `'To Do'`).
 
-`update_task` **auto-records history**: it diffs the current row against your update and writes one `activities` row per changed field (`action` = `updated`/`assigned`/`moved`, or `removed` when a field is cleared). `get_task` returns the task with embedded `activities` and `comments` lists. Validation is minimal now: task existence on lookups and "at least one field" on updates.
+`update_task` **auto-records history**: it diffs the current row against your update and writes one `activities` row per changed field (`action` = `updated`/`assigned`/`moved`, or `removed` when a field is cleared). `add_comment` and `add_proposal` likewise create a parent `activity` wrapper (type `comment`/`proposal`) that the new child links up to, so the activity feed is the single timeline of everything that happened to a task. `accept_proposal` turns a proposal into a real task (via `add_task`) and stamps the proposal's `created_task_id` with the new task id. `get_task` returns the task with embedded `activities`, `comments`, and `proposals` lists. Validation is minimal now: task existence on lookups and "at least one field" on updates.
 
 ```python
 from task_program import TaskCLI, TaskCLIError
@@ -117,7 +135,7 @@ The SurrealDB client is `lru_cache`d in `task_program/db.py` — connected and s
 
 ## 3. CLI tool (`task_cli/`)
 
-The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `task` → `add|list|show|update|delete`, plus `comment` → `add|list` and `activity` → `list`.
+The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `task` → `add|list|show|update|delete`, plus `comment` → `add|list`, `proposal` → `add|list|show|accept|delete`, and `activity` → `list`.
 
 ```bash
 # tasks
@@ -133,13 +151,20 @@ task task delete task:8f3k                               # cascades to activity/
 task comment add --task task:8f3k --text "kickoff call done"
 task comment list --task task:8f3k
 
-# activity history (auto-recorded on task updates)
+# proposals (AI-suggested tasks)
+task proposal add --task task:8f3k --title "Draft outline" --status "To Do"
+task proposal list --task task:8f3k
+task proposal show proposal:xyz
+task proposal accept proposal:xyz                        # creates a task from it
+task proposal delete proposal:xyz
+
+# activity feed (auto-recorded updates + comment/proposal wrapper entries)
 task activity list --task task:8f3k
 ```
 
 Ids are SurrealDB record ids (e.g. `task:8f3k`) — copy them from the `task add` / `task list` output; they are no longer auto-increment integers.
 
-**Required flags** — `task add`: `--title` only (everything else has a default). `comment add`: `--task --text`. `comment list` / `activity list`: `--task`. `--status` is free text (default `To Do`); `--assignee` takes a user record id but is non-functional until users are reintroduced.
+**Required flags** — `task add`: `--title` only (everything else has a default). `comment add`: `--task --text`. `comment list` / `activity list` / `proposal list`: `--task`. `proposal add`: `--task --title` (everything else has a default). `proposal show|accept|delete` take a proposal id positionally. `--status` is free text (default `To Do`); `--assignee` takes a user record id but is non-functional until users are reintroduced.
 
 **Errors** print as one clean line, no traceback (`task_cli/commands/*.py` catches `TaskCLIError` and calls `sys.exit(str(e))`):
 
@@ -156,7 +181,7 @@ Ids are SurrealDB record ids (e.g. `task:8f3k`) — copy them from the `task add
 
 `task_mcp/server.py` registers one MCP tool per active `TaskCLI` method, with the same names as the methods (`add_task`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
 
-Tools exposed: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`, `add_comment`, `list_comments`, `list_activities`. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). The `*_project` tools exist in the file but their `@mcp.tool()` decorators are commented out, so they are not exposed.
+Tools exposed: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`, `add_comment`, `list_comments`, `add_proposal`, `list_proposals`, `get_proposal`, `accept_proposal`, `delete_proposal`, `list_activities`. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). The `*_project` tools exist in the file but their `@mcp.tool()` decorators are commented out, so they are not exposed.
 
 Once configured in Claude Desktop, plain-English requests like *"list my in-progress tasks"* or *"add a comment to that task saying the design is approved"* are routed to the matching tool. Task ids are record-id strings (e.g. `task:8f3k`), which Claude carries between tool calls.
 
@@ -185,12 +210,17 @@ Interactive Swagger docs are at `http://127.0.0.1:8000/docs`.
 |--------------------------------------|-----------------------------------------------------|
 | `POST   /tasks`                      | Create a task (JSON body)                           |
 | `GET    /tasks?status=&project=`     | List tasks, optional `status`/`project` filters     |
-| `GET    /tasks/{id}`                 | Fetch one task with embedded `activities`+`comments`|
+| `GET    /tasks/{id}`                 | Fetch one task with embedded `activities`+`comments`+`proposals` |
 | `PATCH  /tasks/{id}`                 | Update sent fields only (auto-logs history)         |
-| `DELETE /tasks/{id}`                 | Delete a task (history + comments cascade)          |
+| `DELETE /tasks/{id}`                 | Delete a task (history + comments + proposals cascade) |
 | `POST   /tasks/{task_id}/comments`   | Add a comment (JSON body `{"text": "..."}`)         |
 | `GET    /tasks/{task_id}/comments`   | List a task's comments, oldest first                |
-| `GET    /tasks/{task_id}/activities` | List a task's activity history, oldest first        |
+| `POST   /tasks/{task_id}/proposals`  | Add a proposal (JSON body `{"title": "...", ...}`)  |
+| `GET    /tasks/{task_id}/proposals`  | List a task's proposals, oldest first               |
+| `GET    /proposals/{id}`             | Fetch one proposal                                  |
+| `POST   /proposals/{id}/accept`      | Accept a proposal → create a task from it           |
+| `DELETE /proposals/{id}`             | Delete a proposal (its activity wrapper too)        |
+| `GET    /tasks/{task_id}/activities` | List a task's activity feed, oldest first           |
 
 Write endpoints take a JSON body. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). On `PATCH`, only the fields present in the body change — omitted fields are left untouched.
 

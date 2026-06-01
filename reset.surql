@@ -4,6 +4,7 @@
 -- There are no id sequences to reset: SurrealDB record ids are not auto-increment.
 
 DELETE comment;
+DELETE proposal;
 DELETE activity;
 DELETE task;
 DELETE project;

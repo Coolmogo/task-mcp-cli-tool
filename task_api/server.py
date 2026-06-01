@@ -79,6 +79,14 @@ class CommentCreate(BaseModel):
     text: str
 
 
+class ProposalCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    status: str = DEFAULT_STATUS
+    stage_id: Optional[str] = None
+    assignee_id: Optional[str] = None
+
+
 # ---- task routes -----------------------------------------------------------
 
 
@@ -131,8 +139,45 @@ def list_comments(task_id: str) -> list[dict]:
 
 @app.get("/tasks/{task_id}/activities")
 def list_activities(task_id: str) -> list[dict]:
-    """List a task's activity history (auto-recorded field changes), oldest first."""
+    """List a task's activity feed (auto-recorded field changes plus comment and
+    proposal wrapper entries), oldest first."""
     return _api().list_activities(task_id)
+
+
+# ---- proposal routes -------------------------------------------------------
+# A proposal is an AI agent's suggested task; accepting one spawns a real task.
+
+
+@app.post("/tasks/{task_id}/proposals", status_code=201)
+def add_proposal(task_id: str, body: ProposalCreate) -> dict:
+    """Propose a task for an existing task. status is free text (default 'To Do')."""
+    return _api().add_proposal(task_id, **body.model_dump())
+
+
+@app.get("/tasks/{task_id}/proposals")
+def list_proposals(task_id: str) -> list[dict]:
+    """List a task's proposals, oldest first."""
+    return _api().list_proposals(task_id)
+
+
+@app.get("/proposals/{id}")
+def get_proposal(id: str) -> dict:
+    """Fetch a single proposal by id."""
+    return _api().get_proposal(id)
+
+
+@app.post("/proposals/{id}/accept")
+def accept_proposal(id: str) -> dict:
+    """Accept a proposal: create a real task from its fields and record the new
+    task's id on the proposal (created_task_id). Returns the created task."""
+    return _api().accept_proposal(id)
+
+
+@app.delete("/proposals/{id}")
+def delete_proposal(id: str) -> dict:
+    """Delete a proposal by id. Its activity wrapper is removed too."""
+    _api().delete_proposal(id)
+    return {"detail": f"Deleted proposal #{id}"}
 
 
 def main() -> None:

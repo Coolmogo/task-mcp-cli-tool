@@ -51,6 +51,7 @@ _LINK_RENAMES = {
     "project": "project_id",
     "task": "task_id",
     "author": "author_id",
+    "activity": "activity_id",  # comment/proposal -> parent activity wrapper
 }
 
 _TASK_KEYS = (
@@ -62,7 +63,11 @@ _ACTIVITY_KEYS = (
     "old_value", "new_value", "text", "author_id", "legacy_author_name", "created_at",
 )
 _COMMENT_KEYS = (
-    "id", "task_id", "text", "author_id", "legacy_author_name", "created_at",
+    "id", "task_id", "activity_id", "text", "author_id", "legacy_author_name", "created_at",
+)
+_PROPOSAL_KEYS = (
+    "id", "task_id", "activity_id", "title", "description", "status",
+    "stage_id", "assignee_id", "created_task_id", "created_at",
 )
 _PROJECT_KEYS = (
     "id", "title", "description", "start_date", "end_date", "no_of_stages",
@@ -90,6 +95,7 @@ class TaskCLI:
     TASKS = "task"
     ACTIVITIES = "activity"
     COMMENTS = "comment"
+    PROPOSALS = "proposal"
 
     def __init__(
         self,
@@ -150,6 +156,19 @@ class TaskCLI:
             "legacy_author_name": None,
         })
 
+    def _create_activity_wrapper(self, task_rid: RecordID, type_: str, action: str) -> RecordID:
+        """Create a parent activity row for a comment/proposal subtype and return
+        its RecordID. The child row points up to this via its `activity` link;
+        subtype detail (text, proposed fields) lives on the child, not here."""
+        row = self._client.create(self.ACTIVITIES, {
+            "task": task_rid,
+            "type": type_,
+            "action": action,
+            "author": None,
+            "legacy_author_name": None,
+        })
+        return row["id"]
+
     # ---- tasks --------------------------------------------------------------
 
     def add_task(
@@ -199,7 +218,8 @@ class TaskCLI:
         res = self._client.query(
             "SELECT *, "
             "(SELECT * FROM activity WHERE task = $t ORDER BY created_at) AS activities, "
-            "(SELECT * FROM comment  WHERE task = $t ORDER BY created_at) AS comments "
+            "(SELECT * FROM comment  WHERE task = $t ORDER BY created_at) AS comments, "
+            "(SELECT * FROM proposal WHERE task = $t ORDER BY created_at) AS proposals "
             "FROM $t",
             {"t": self._rid(id)},
         )
@@ -209,6 +229,7 @@ class TaskCLI:
         row = _normalize(raw, _TASK_KEYS)
         row["activities"] = [_normalize(a, _ACTIVITY_KEYS) for a in (raw.get("activities") or [])]
         row["comments"] = [_normalize(c, _COMMENT_KEYS) for c in (raw.get("comments") or [])]
+        row["proposals"] = [_normalize(p, _PROPOSAL_KEYS) for p in (raw.get("proposals") or [])]
         return row
 
     def update_task(
@@ -266,16 +287,22 @@ class TaskCLI:
         self._get_task_row(id)  # validate it exists
         rid = self._rid(id)
         # SurrealDB has no FK cascade: remove children explicitly, then the task.
+        # The comment/proposal activity wrappers live in `activity`, so the first
+        # DELETE clears them too.
         self._client.query("DELETE activity WHERE task = $t", {"t": rid})
         self._client.query("DELETE comment WHERE task = $t", {"t": rid})
+        self._client.query("DELETE proposal WHERE task = $t", {"t": rid})
         self._client.delete(rid)
 
     # ---- comments -----------------------------------------------------------
 
     def add_comment(self, task_id, text: str) -> dict:
         self._get_task_row(task_id)  # validate the task exists
+        task_rid = self._rid(task_id)
+        wrapper = self._create_activity_wrapper(task_rid, "comment", "commented")
         row = self._client.create(self.COMMENTS, {
-            "task": self._rid(task_id),
+            "task": task_rid,
+            "activity": wrapper,
             "text": text,
             "author": None,
             "legacy_author_name": None,
@@ -297,6 +324,73 @@ class TaskCLI:
             {"t": self._rid(task_id)},
         )
         return [_normalize(r, _ACTIVITY_KEYS) for r in rows]
+
+    # ---- proposals ----------------------------------------------------------
+    # An AI agent's suggested task. add_proposal creates a parent activity wrapper
+    # (type 'proposal') plus the proposal child linking up to it; accept_proposal
+    # turns a proposal into a real task.
+
+    def _get_proposal_row(self, id) -> dict:
+        res = self._client.query("SELECT * FROM $p", {"p": self._rid(id)})
+        if not res:
+            raise TaskCLIError(f"Proposal #{id} not found")
+        return _normalize(res[0], _PROPOSAL_KEYS)
+
+    def add_proposal(
+        self,
+        task_id,
+        title: str,
+        *,
+        description: Optional[str] = None,
+        status: str = DEFAULT_STATUS,
+        stage_id: Optional[str] = None,
+        assignee_id: Optional[str] = None,
+    ) -> dict:
+        self._get_task_row(task_id)  # validate the task exists
+        task_rid = self._rid(task_id)
+        wrapper = self._create_activity_wrapper(task_rid, "proposal", "proposed")
+        row = self._client.create(self.PROPOSALS, {
+            "task": task_rid,
+            "activity": wrapper,
+            "title": title,
+            "description": description,
+            "status": status,
+            "stage_id": stage_id,
+            "assignee_id": assignee_id,
+            "created_task_id": None,
+        })
+        return _normalize(row, _PROPOSAL_KEYS)
+
+    def list_proposals(self, task_id) -> list[dict]:
+        rows = self._client.query(
+            "SELECT * FROM proposal WHERE task = $t ORDER BY created_at",
+            {"t": self._rid(task_id)},
+        )
+        return [_normalize(r, _PROPOSAL_KEYS) for r in rows]
+
+    def get_proposal(self, id) -> dict:
+        return self._get_proposal_row(id)
+
+    def delete_proposal(self, id) -> None:
+        proposal = self._get_proposal_row(id)  # validate it exists
+        # Remove the parent activity wrapper, then the proposal itself.
+        if proposal.get("activity_id"):
+            self._client.delete(self._rid(proposal["activity_id"]))
+        self._client.delete(self._rid(id))
+
+    def accept_proposal(self, id) -> dict:
+        """Create a real task from the proposal's fields and record its id on the
+        proposal (created_task_id). Returns the newly created task."""
+        proposal = self._get_proposal_row(id)
+        task = self.add_task(
+            proposal["title"],
+            description=proposal.get("description"),
+            status=proposal.get("status") or DEFAULT_STATUS,
+            assignee_id=proposal.get("assignee_id"),
+            stage_id=proposal.get("stage_id"),
+        )
+        self._client.merge(self._rid(id), {"created_task_id": task["id"]})
+        return task
 
     # ---- projects (dead: reintroduce later) ---------------------------------
     # Projects are shelved. These methods still target the surviving `project`

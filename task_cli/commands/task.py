@@ -67,6 +67,12 @@ def show(args) -> None:
     for c in comments:
         print(f"  - {c['text']} ({c.get('created_at')})")
 
+    proposals = row.get("proposals") or []
+    print(f"  proposals:   {len(proposals)}")
+    for p in proposals:
+        accepted = f" -> {p['created_task_id']}" if p.get("created_task_id") else ""
+        print(f"  - #{p['id']} [{p['status']}] {p['title']}{accepted} ({p.get('created_at')})")
+
 
 def update(args) -> None:
     try:
