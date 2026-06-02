@@ -110,6 +110,16 @@ def _build_activity_parser(sub: argparse._SubParsersAction) -> None:
     lst.add_argument("--task", required=True, help="Task ID")
     lst.set_defaults(func=activity_cmd.list_)
 
+    decide_p = verbs.add_parser("decide", help="Accept a pending proposal")
+    decide_p.add_argument("activity_id", help="Proposal activity ID (e.g., activity:abc123)")
+    decide_p.add_argument("--message", help="Optional note about the decision")
+    decide_p.set_defaults(func=activity_cmd.decide_proposal)
+
+    reject_p = verbs.add_parser("reject", help="Reject a pending proposal")
+    reject_p.add_argument("activity_id", help="Proposal activity ID (e.g., activity:abc123)")
+    reject_p.add_argument("--message", help="Optional note about the rejection")
+    reject_p.set_defaults(func=activity_cmd.reject_proposal)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(

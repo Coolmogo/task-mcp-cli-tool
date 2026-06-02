@@ -23,7 +23,7 @@ def is_spark_assignee(assignee_id: str | None) -> bool:
 def build_assignment_trigger(task_id: str) -> SparkTrigger:
     return SparkTrigger(
         kind="assignment",
-        prompt="You were just assigned this task. Reply with the most useful next step.",
+        prompt="You were just assigned this task. Analyze the context and emit the most helpful verb: propose a new subtask, instruct the human, ask for clarification, or update the task. Focus on proposing actionable next steps.",
         metadata={
             "triggered_by_type": "assignment",
             "task_id": task_id,

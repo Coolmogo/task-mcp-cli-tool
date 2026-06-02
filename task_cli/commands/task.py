@@ -14,13 +14,26 @@ def _format(row: dict) -> str:
 
 
 def _format_activity(row: dict) -> str:
-    parts = [f"  - [{row['action']}]"]
-    if row.get("field"):
-        parts.append(row["field"])
-    if row.get("old_value") is not None or row.get("new_value") is not None:
-        parts.append(f"{row.get('old_value')!r} -> {row.get('new_value')!r}")
-    if row.get("text"):
-        parts.append(row["text"])
+    activity_type = row.get("type", "unknown")
+    parts = [f"  - [{activity_type}]"]
+
+    # Audit log format: (verb) -> (to_actor) -> (message)
+    if row.get("target_name"):
+        parts.append(f"-> {row.get('target_name')}")
+
+    if activity_type == "update":
+        if row.get("action"):
+            parts.append(row["action"])
+        if row.get("field"):
+            parts.append(row["field"])
+        if row.get("old_value") is not None or row.get("new_value") is not None:
+            parts.append(f"{row.get('old_value')!r} -> {row.get('new_value')!r}")
+    elif activity_type in ("ask", "instruct", "propose"):
+        if row.get("content"):
+            parts.append(f"-> {row.get('content')!r}")
+        elif row.get("proposal_title"):
+            parts.append(f"-> {row.get('proposal_title')!r}")
+
     parts.append(f"({row.get('created_at')})")
     return " ".join(parts)
 
@@ -58,14 +71,9 @@ def show(args) -> None:
     print(_format(row))
 
     activities = row.get("activities") or []
-    print(f"  activity:    {len(activities)} entr{'y' if len(activities) == 1 else 'ies'}")
+    print(f"  activity feed: {len(activities)} entr{'y' if len(activities) == 1 else 'ies'}")
     for act in activities:
         print(_format_activity(act))
-
-    comments = row.get("comments") or []
-    print(f"  comments:    {len(comments)}")
-    for c in comments:
-        print(f"  - {c['text']} ({c.get('created_at')})")
 
 
 def update(args) -> None:

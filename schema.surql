@@ -35,52 +35,33 @@ DEFINE FIELD IF NOT EXISTS stage_id    ON task TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS project     ON task TYPE option<record<project>>;
 DEFINE FIELD IF NOT EXISTS created_at  ON task TYPE datetime DEFAULT time::now();
 
--- Auto-recorded activity history. One row per changed task field (see program.py).
-DEFINE TABLE IF NOT EXISTS activity SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS task               ON activity TYPE record<task>;
-DEFINE FIELD IF NOT EXISTS type               ON activity TYPE string DEFAULT 'history';
-DEFINE FIELD IF NOT EXISTS action             ON activity TYPE string;
-DEFINE FIELD IF NOT EXISTS field              ON activity TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS old_value          ON activity TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS new_value          ON activity TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS text               ON activity TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS author             ON activity TYPE option<record<user>>;
-DEFINE FIELD IF NOT EXISTS legacy_author_name ON activity TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS created_at         ON activity TYPE datetime DEFAULT time::now();
+-- Unified activity feed. Every event on a task is one row; `type` is the discriminator.
+-- Types: update | ask | instruct | delegate | propose | decide | dismiss
+DEFINE TABLE IF NOT EXISTS activity SCHEMALESS;
+DEFINE FIELD IF NOT EXISTS task                          ON activity TYPE record<task>;
+DEFINE FIELD IF NOT EXISTS type                          ON activity TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at                    ON activity TYPE datetime DEFAULT time::now();
 
--- Free-text comments. Never auto-logged; added only via add_comment.
-DEFINE TABLE IF NOT EXISTS comment SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS task               ON comment TYPE record<task>;
-DEFINE FIELD IF NOT EXISTS text               ON comment TYPE string;
-DEFINE FIELD IF NOT EXISTS author_id          ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS author_type        ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS author             ON comment TYPE option<record<user>>;
-DEFINE FIELD IF NOT EXISTS legacy_author_name ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS metadata           ON comment TYPE option<object>;
-DEFINE FIELD IF NOT EXISTS metadata.action_type             ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS metadata.confidence              ON comment TYPE option<float>;
-DEFINE FIELD IF NOT EXISTS metadata.triggered_by_comment_id ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS metadata.triggered_by_type       ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS metadata.task_id                 ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS metadata.proposal_type           ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS metadata.created_task_id         ON comment TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS created_at         ON comment TYPE datetime DEFAULT time::now();
-
-DEFINE FIELD IF NOT EXISTS metadata.proposal_id ON comment TYPE option<string>;
+-- Allow NULL for all optional fields (override old definitions)
+DEFINE FIELD action                        ON activity TYPE none | string;
+DEFINE FIELD field                         ON activity TYPE none | string;
+DEFINE FIELD old_value                     ON activity TYPE none | string;
+DEFINE FIELD new_value                     ON activity TYPE none | string;
+DEFINE FIELD text                          ON activity TYPE none | string;
+DEFINE FIELD author                        ON activity TYPE none | record<user>;
+DEFINE FIELD author_id                     ON activity TYPE none | string;
+DEFINE FIELD author_type                   ON activity TYPE none | string;
+DEFINE FIELD legacy_author_name            ON activity TYPE none | string;
+DEFINE FIELD metadata                      ON activity TYPE none | object;
+DEFINE FIELD proposal_status               ON activity TYPE none | string;
+DEFINE FIELD proposal_title                ON activity TYPE none | string;
+DEFINE FIELD proposal_description          ON activity TYPE none | string;
+DEFINE FIELD proposal_assignee_id          ON activity TYPE none | string;
+DEFINE FIELD proposal_stage_id             ON activity TYPE none | string;
+DEFINE FIELD proposal_created_task_id      ON activity TYPE none | string;
+DEFINE FIELD proposal_activity_id          ON activity TYPE none | string;
+DEFINE FIELD IF NOT EXISTS from_actor    ON activity TYPE none | string;
+DEFINE FIELD IF NOT EXISTS to_actor      ON activity TYPE none | string;
 
 DEFINE INDEX IF NOT EXISTS activity_task ON activity FIELDS task;
-DEFINE INDEX IF NOT EXISTS comment_task  ON comment  FIELDS task;
-
--- Pending proposals created by Spark. Users accept or reject them before a task
--- is created. status: pending | accepted | rejected.
-DEFINE TABLE IF NOT EXISTS proposal SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS task            ON proposal TYPE record<task>;
-DEFINE FIELD IF NOT EXISTS status          ON proposal TYPE string DEFAULT 'pending';
-DEFINE FIELD IF NOT EXISTS title           ON proposal TYPE string;
-DEFINE FIELD IF NOT EXISTS description     ON proposal TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS assignee_id     ON proposal TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS stage_id        ON proposal TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS created_task_id ON proposal TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS created_at      ON proposal TYPE datetime DEFAULT time::now();
-
-DEFINE INDEX IF NOT EXISTS proposal_task ON proposal FIELDS task;
+DEFINE INDEX IF NOT EXISTS activity_type ON activity FIELDS task, type;

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,8 +12,8 @@ class SparkSettings(BaseSettings):
         extra="ignore",
     )
 
-    google_api_key: str | None = None
-    google_model: str = "gemini-2.5-flash"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "anthropic/claude-3-haiku"
 
 
 @lru_cache(maxsize=1)

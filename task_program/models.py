@@ -15,17 +15,13 @@ class Status(str, Enum):
     DONE = "Done"
 
 
-class ActivityType(str, Enum):
-    COMMENT = "comment"
-    HISTORY = "history"
-
-
-class ActivityAction(str, Enum):
-    COMMENTED = "commented"
-    UPDATED = "updated"
-    REMOVED = "removed"
-    ASSIGNED = "assigned"
-    MOVED = "moved"
+class ActivityVerb(str, Enum):
+    UPDATE = "update"
+    ASK = "ask"
+    INSTRUCT = "instruct"
+    PROPOSE = "propose"
+    DECIDE = "decide"
+    DISMISS = "dismiss"
 
 
 @dataclass
@@ -39,30 +35,56 @@ class User:
 
 
 @dataclass
-class ActivityLog:
+class Activity:
+    """Base activity class. Represents an action (verb) on a task.
+    The audit log format is: (verb) → (to_actor) → (message)"""
     id: Optional[str]
     task_id: str
-    type: ActivityType
-    action: ActivityAction
-    timestamp: datetime
-    text: Optional[str] = None
-    field: Optional[str] = None
-    old_value: Optional[str] = None
-    new_value: Optional[str] = None
+    verb: str           # what action (update/ask/instruct/propose)
+    created_at: datetime
+    from_actor: Optional[str] = None   # who initiated it
+    to_actor: Optional[str] = None     # who it's directed at
+    content: Optional[str] = None      # the message/text
+    # Legacy fields for backward compat with old DB records
     author_id: Optional[str] = None
+    author_type: Optional[str] = None
     legacy_author_name: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 @dataclass
-class Comment:
-    id: Optional[str]
-    task_id: str
-    text: str
-    created_at: datetime
-    author_type: str = "user"
-    author_id: Optional[str] = "current_user"
-    metadata: Optional[dict] = None
-    legacy_author_name: Optional[str] = None
+class Update(Activity):
+    """Field-change audit entry. Maps to type='update' verb."""
+    action: Optional[str] = None       # updated / removed / assigned / moved
+    field: Optional[str] = None        # dueDate, status, stageId, title, ...
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+
+
+@dataclass
+class Ask(Activity):
+    """Question directed at an actor. Maps to type='ask' verb.
+    to_actor = who is being asked; content = the question."""
+    pass
+
+
+@dataclass
+class Instruct(Activity):
+    """Directive/instruction directed at an actor. Maps to type='instruct' verb.
+    to_actor = who is being instructed; content = the instruction."""
+    pass
+
+
+@dataclass
+class Proposal(Activity):
+    """Proposed action pending approval. Maps to type='propose' verb."""
+    proposal_status: Optional[str] = None
+    proposal_title: Optional[str] = None
+    proposal_description: Optional[str] = None
+    proposal_assignee_id: Optional[str] = None
+    proposal_stage_id: Optional[str] = None
+    proposal_created_task_id: Optional[str] = None
+    proposal_activity_id: Optional[str] = None
 
 
 @dataclass
@@ -77,19 +99,6 @@ class Task:
     project_id: Optional[str] = None
     stage_id: Optional[str] = None
     activities: list = field(default_factory=list)
-    comments: list = field(default_factory=list)
-
-
-@dataclass
-class Proposal:
-    id: Optional[str]
-    task_id: str
-    status: str  # pending | accepted | rejected
-    title: str
-    description: Optional[str] = None
-    assignee_id: Optional[str] = None
-    stage_id: Optional[str] = None
-    created_task_id: Optional[str] = None
 
 
 # ---- dead: reintroduce with projects later ---------------------------------

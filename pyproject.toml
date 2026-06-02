@@ -13,12 +13,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]>=1.0"]
-api = [
+mcp = [
+  "mcp[cli]>=1.0",
+  "pydantic-ai[google]>=0.1.0",
   "ddgs>=4.0",
-  "fastapi>=0.110",
-  "google-genai>=1.0",
   "pydantic-settings>=2.2",
+]
+api = [
+  "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
 ]
 
