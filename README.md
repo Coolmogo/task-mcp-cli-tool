@@ -232,8 +232,10 @@ Shortcut: Postman's **Import** button accepts a pasted `curl …` command and fi
 
 ### Spark MVP note
 
-1. Set either `OPENAI_API_KEY` or `GOOGLE_API_KEY` in the backend environment or `.env`, and choose `SPARK_LLM_PROVIDER=openai` or `SPARK_LLM_PROVIDER=google`.
-2. Install the API extras with `pip install -e ".[api]"`.
+Spark is the AI agent. It lives in its own `spark_agent/` package and runs **out of process**: when a task is assigned to `user:spark` (or a comment lands on a Spark-assigned task), the server launches `python -m spark_agent <task_id>` fire-and-forget. Spark connects back over MCP (`task_mcp`) to read the task and post its reply, so the reply appears a moment *after* your request returns — refetch the activity feed to see it.
+
+1. Set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL`) in the backend environment or `.env`.
+2. Install the extras: `pip install -e ".[api,mcp,spark]"` (the API server, the MCP server Spark talks to, and Spark itself).
 3. Start the API with `python -m task_api`.
 4. Assign the task to Spark with `{"assignee_id": "user:spark"}` on `PATCH /tasks/{task_id}`.
 5. POST to `/tasks/{task_id}/comments` with:
@@ -242,5 +244,7 @@ Shortcut: Postman's **Import** button accepts a pasted `curl …` command and fi
 {"content": "Summarize this task"}
 ```
 
-6. Confirm the user comment is saved.
-7. Confirm Spark's reply is saved as a second task comment when generation succeeds.
+6. The response returns your comment immediately with `spark_comments: []` (Spark is async).
+7. After a moment, `GET /tasks/{task_id}/activities` shows Spark's reply (a comment or a proposal).
+
+To run a Spark turn directly (no server needed), call it yourself: `python -m spark_agent <task_id> --trigger assignment`.

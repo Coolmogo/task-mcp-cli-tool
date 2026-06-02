@@ -8,14 +8,15 @@ This is the Python backend for **coolmogo MVP** — a task-centric, approval-dri
 
 The MVP demo is the **Gmail inbox flow**: connect Gmail → agent reads inbox → drafts reply per email → user approves → email sent.
 
-The backend has three packages sharing a single execution layer:
+The backend has a single execution layer with several clients:
 
-- `task_program/` — execution layer. `TaskCLI` class + SurrealDB access. No API, CLI, or MCP code.
+- `task_program/` — execution layer. `TaskCLI` class + SurrealDB access. No API, CLI, MCP, or Spark code (only `agent_identity.py`, the system's notion of the Spark user).
 - `task_api/` — FastAPI REST server. Imports `TaskCLI`. This is the primary interface for the Flutter app.
-- `task_mcp/` — MCP server. **Does NOT import `task_program` directly** — it is an HTTP client that calls `task_api`. Auth via `X-API-Key` header.
+- `task_mcp/` — MCP server (FastMCP, stdio). Imports `TaskCLI`. Exposes task tools plus Spark-facing tools (`get_task_context`, `post_spark_comment`, `create_spark_proposal`).
 - `task_cli/` — CLI client. Imports `TaskCLI`. Development/debugging tool.
+- `spark_agent/` — **Spark, the AI agent**. A standalone client that talks to the system *only* through `task_mcp` (MCP over stdio); it never imports `task_program`. Launched fire-and-forget (`python -m spark_agent <task_id>`) by `task_api`/`task_mcp` when a Spark trigger fires.
 
-`task_api` and `task_mcp` are peers consuming the same REST surface. The Flutter app uses `task_api`; Claude Desktop / Cursor / OpenClaw use `task_mcp`.
+`task_api` and `task_mcp` are peers over the same `TaskCLI`. The Flutter app uses `task_api`; Claude Desktop / Cursor use `task_mcp`. Spark is just another MCP client.
 
 **Projects are shelved** — the project table, `TaskCLI` methods, CLI parser, and MCP tools are kept as clearly-labeled dead code.
 
@@ -35,17 +36,21 @@ python -m task_cli --help
 ## Architecture
 
 ```
-task_program/               # execution layer (library only — no API/MCP/CLI imports)
+task_program/               # execution layer (library only — no API/MCP/CLI/Spark imports)
 ├── __init__.py             #   exports TaskCLI, TaskCLIError
 ├── program.py              #   TaskCLI class — verb methods, activity logging, _normalize + SurrealDB calls
 ├── db.py                   #   cached Surreal client; reads SURREALDB_* from .env, signs in as root
 ├── models.py               #   Task, Activity dataclasses; ActivityVerb enum; Project (dead)
-├── schemas.py              #   Pydantic models: SparkOutput (list), SparkActivityItem, proposal content types
-├── settings.py             #   SparkSettings, AuthSettings, GmailSettings — separate classes, each lru_cached
-├── proposal_content.py     #   Discriminated union: EmailProposalContent | ReassignProposalContent | NewTaskProposalContent
-├── spark_agent.py          #   SparkTrigger; build_assignment_trigger(), build_comment_trigger()
-├── spark_service.py        #   generate_spark_reply() — returns list[SparkActivityItem]; LLM + web search
-└── gmail_client.py         #   GmailOAuth2Client — OAuth flow, inbox read, email send, AES-256 token storage
+└── agent_identity.py       #   Spark identity/routing only: SPARK_* constants + is_spark_assignee()
+
+spark_agent/                # Spark — the AI agent (standalone MCP client; never imports task_program)
+├── __main__.py             #   `python -m spark_agent <task_id> [--trigger ...]` shim → runner.main()
+├── runner.py               #   one Spark turn: read context (MCP) → run LLM → write reply (MCP)
+├── mcp_client.py           #   spawns `python -m task_mcp` over stdio; call_tool(name, **args)
+├── service.py              #   generate_spark_reply() — LLM (pydantic-ai/OpenRouter) + DuckDuckGo search
+├── triggers.py             #   SparkTrigger; build_assignment_trigger(), build_comment_trigger()
+├── schemas.py              #   TaskContext, SparkTaskAction, SparkCreateTaskProposal
+└── settings.py             #   SparkSettings (OPENROUTER_*), lru_cached
 
 task_api/                   # FastAPI REST server
 ├── __main__.py             #   uvicorn shim
@@ -124,27 +129,24 @@ A `proposal` verb activity stores its content as `proposal_content` (a JSON obje
 
 ## Agent Integration (Spark)
 
-**Spark** is the AI agent assigned to tasks. It runs asynchronously when a task is assigned to `user:spark` or when a user comments on a Spark-assigned task.
+**Spark** is the AI agent assigned to tasks. It lives entirely in the `spark_agent/` package — a standalone **MCP client**, not part of the execution or transport layers. It runs **asynchronously, out of process**.
 
-**Output format**: `generate_spark_reply()` in `spark_service.py` returns `list[SparkActivityItem]`. The list may start with any number of `update` or `instruct` items (narration, research findings), but the **last item must always be `proposal | ask | propose_dismiss`** (enforced by Pydantic validator on `SparkOutput`).
+**Trigger → hand-off → reply (the whole loop):**
 
-**Example output:**
-```python
-[
-    SparkActivityItem(verb="instruct", text="Research complete. Found 3 competitors..."),
-    SparkActivityItem(verb="proposal", proposal_content={"type": "new_task", "description": "..."})
-]
-```
+1. **Detect** — `task_api` and `task_mcp` watch for the same two triggers: a task assigned to `user:spark`, or a comment on a Spark-assigned task. Detection uses `is_spark_assignee()` from `task_program/agent_identity.py`.
+2. **Spawn** — on a trigger, the server calls `_spawn_spark(...)`, which `subprocess.Popen`s `python -m spark_agent <task_id> --trigger {assignment|comment} [--comment-id ... --text ...]` **detached, fire-and-forget**. The server returns immediately — it never blocks on the LLM. (Because Spark is async, `POST /tasks/{id}/comments` returns `spark_comments: []`; clients refetch `/tasks/{id}/activities` to see Spark's reply.)
+3. **Read** — `spark_agent/runner.py` opens an MCP client (`mcp_client.py` spawns `python -m task_mcp` over stdio) and calls `get_task_context` to fetch the task + recent comments/activity, validated into `TaskContext`.
+4. **Think** — `generate_spark_reply()` (`service.py`) builds the prompt, optionally runs a DuckDuckGo search, calls the LLM, and returns one `SparkTaskAction` (`action_type` ∈ ask/instruct/update/propose).
+5. **Write** — `runner._dispatch()` writes the reply back via MCP:
+   - `ask` / `instruct` → `post_spark_comment(verb=...)`
+   - `update` with `update_fields` → `update_task`; otherwise the message → `post_spark_comment(verb="instruct")`
+   - `propose` → `create_spark_proposal(...)` (markdown stripped from title/description)
 
-**`_run_spark_sequence()`** in `task_api/server.py` iterates the list and dispatches each item:
-- `update` / `instruct` → `add_comment(verb=...)`
-- `proposal` → `create_proposal_v2(content_dict)`
-- `ask` → `add_comment(verb="ask")`
-- `propose_dismiss` → `add_comment(verb="propose_dismiss")`
+**No Spark→Spark loop:** the spark-facing tools (`get_task_context`, `post_spark_comment`, `create_spark_proposal`) author as Spark and **do not** re-fire a trigger. Only the human-facing tools (`add_comment`, `add_instruction`, `add_task`, `update_task`) spawn Spark.
 
-**Configuration:** `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` in `.env`. Web search (DuckDuckGo via `ddgs`) is triggered when comments contain keywords like "research", "find out", "look up".
+**Configuration:** `OPENROUTER_API_KEY` and `OPENROUTER_MODEL` in `.env` (read by `SparkSettings` in `spark_agent/settings.py`). Install Spark's deps with the `[spark]` extra. Web search (DuckDuckGo via `ddgs`) fires when a comment contains keywords like "research", "find out", "look up".
 
-**Fallback:** On any LLM error, `generate_spark_reply()` returns `[SparkActivityItem(verb="ask", text="I need more context...")]`.
+**Fallback:** on any error (missing key, LLM failure, bad context), Spark posts a single plain comment so the user knows it tried.
 
 ## Auth
 
@@ -278,5 +280,6 @@ Activities are fetched via `GET /tasks/{id}/activities` (all) + `GET /tasks/{id}
 - No interactive prompts — everything must be scriptable.
 - No colored/table output in CLI — plain text pipes cleanly.
 - No offline mode — SurrealDB is the source of truth.
-- No `task_program` imports in `task_mcp/` — MCP is an HTTP client only.
 - No direct DB calls from `task_api` routes — all DB access goes through `TaskCLI`.
+- No `task_program` (or `TaskCLI`) imports in `spark_agent/` — Spark is an MCP client and must reach the system only through `task_mcp` tools.
+- No in-process Spark in `task_api`/`task_mcp` — they only *detect* triggers and spawn `spark_agent`; never call `generate_spark_reply` inline.

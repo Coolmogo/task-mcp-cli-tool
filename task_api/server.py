@@ -6,6 +6,8 @@ Interactive docs at /docs.
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from typing import Optional
 
 from fastapi import FastAPI
@@ -16,18 +18,11 @@ from pydantic import BaseModel
 
 from task_program import TaskCLI, TaskCLIError
 from task_program.models import DEFAULT_STATUS
-from task_program.spark_agent import (
-    SPARK_AUTHOR_ID,
-    SPARK_AUTHOR_TYPE,
+from task_program.agent_identity import (
     SPARK_USER_ID,
     SPARK_USER_NAME,
-    SparkTrigger,
-    build_assignment_trigger,
-    build_comment_trigger,
     is_spark_assignee,
 )
-from task_program.spark_service import generate_spark_reply
-from task_program.settings import SparkSettings, get_settings
 
 from .schemas import (
     AcceptProposalResponse,
@@ -37,7 +32,6 @@ from .schemas import (
     ProposalResponse,
     TaskActivityResponse,
     TaskCommentResponse,
-    TaskContext,
 )
 
 
@@ -63,81 +57,44 @@ def _api() -> TaskCLI:
     return _api_singleton
 
 
-# ---- spark helpers ---------------------------------------------------------
+# ---- spark hand-off --------------------------------------------------------
+# Spark no longer runs in-process. When a trigger fires we launch the standalone
+# `spark_agent` package as a detached subprocess; it talks back over MCP and
+# posts its reply asynchronously.
 
 
-def _post_spark_comment(task_id: str, content: str, verb: str = "instruct", metadata: dict | None = None) -> dict:
-    """Post a Spark-authored comment to a task."""
-    return _api().add_comment(
-        task_id,
-        content,
-        verb=verb,
-        author_type=SPARK_AUTHOR_TYPE,
-        author_id=SPARK_AUTHOR_ID,
-        to_actor="current_user",
-        metadata=metadata,
-        legacy_author_name=SPARK_USER_NAME,
-    )
+def _spawn_spark(task_id: str, *, trigger: str, comment_id: str | None = None, text: str | None = None) -> None:
+    """Fire-and-forget launch of a Spark turn. Returns immediately."""
+    args = [sys.executable, "-m", "spark_agent", task_id, "--trigger", trigger]
+    if comment_id is not None:
+        args += ["--comment-id", comment_id]
+    if text is not None:
+        args += ["--text", text]
 
+    kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
 
-def _create_pending_proposal(task_id: str, spark_reply) -> dict:
-    """Create a proposal from a Spark reply."""
-    proposal = spark_reply.proposal
-    if proposal is None or proposal.proposal_type != "create_task":
-        raise ValueError("Invalid Spark proposal")
-
-    return _api().create_proposal(
-        task_id,
-        proposal.title,
-        proposal.description,
-        assignee_id=proposal.assignee_id,
-        stage_id=proposal.stage_id,
-        author_id=SPARK_AUTHOR_ID,
-        author_type=SPARK_AUTHOR_TYPE,
-        legacy_author_name=SPARK_USER_NAME,
-        metadata={"spark_message": spark_reply.message, "spark_confidence": spark_reply.confidence},
-    )
-
-
-def _run_spark_sequence(task_id: str, trigger: SparkTrigger) -> list[dict]:
-    """Run Spark orchestration: handle ask, instruct, update, propose, decide, dismiss."""
-    spark_comments = []
     try:
-        context_dict = _api().build_task_context(task_id)
-        context = TaskContext(**context_dict)
+        subprocess.Popen(args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - never let a hand-off failure break the request
+        logger.exception("Failed to launch spark_agent for task %s: %s", task_id, exc)
 
-        spark_reply = generate_spark_reply(context, trigger.prompt)
-        logger.info("Spark reply for task %s: action_type=%s, confidence=%.2f", task_id, spark_reply.action_type, spark_reply.confidence)
 
-        if spark_reply.action_type == "ask":
-            comment = _post_spark_comment(task_id, spark_reply.message, verb="ask", metadata={"spark_confidence": spark_reply.confidence})
-            spark_comments.append(comment)
-        elif spark_reply.action_type == "instruct":
-            comment = _post_spark_comment(task_id, spark_reply.message, verb="instruct", metadata={"spark_confidence": spark_reply.confidence})
-            spark_comments.append(comment)
-        elif spark_reply.action_type == "update":
-            # Auto-update task fields based on Spark's analysis
-            if spark_reply.update_fields:
-                updated_task = _api().update_task(task_id, **spark_reply.update_fields)
-                logger.info("Spark auto-updated task %s: %s", task_id, spark_reply.update_fields)
-        elif spark_reply.action_type == "propose":
-            proposal = _create_pending_proposal(task_id, spark_reply)
-            spark_comments.append(proposal)
-    except Exception as exc:
-        logger.exception("Spark sequence failed for task %s: %s", task_id, exc)
-        # Post a fallback message so user knows Spark tried but failed
-        try:
-            fallback_comment = _post_spark_comment(
-                task_id,
-                "I encountered an error processing your request. Please try again in a moment.",
-                verb="instruct",
-                metadata={"spark_confidence": 0.0, "spark_error": True}
-            )
-            spark_comments.append(fallback_comment)
-        except Exception as fallback_exc:
-            logger.exception("Failed to post fallback comment for task %s: %s", task_id, fallback_exc)
+def _trigger_spark_assignment(task_id: str) -> None:
+    _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
+    _spawn_spark(task_id, trigger="assignment")
 
-    return spark_comments
+
+def _trigger_spark_comment(task_id: str, comment_id: str, text: str) -> None:
+    _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
+    _spawn_spark(task_id, trigger="comment", comment_id=comment_id, text=text)
 
 
 @app.exception_handler(TaskCLIError)
@@ -179,7 +136,7 @@ def add_task(body: TaskCreate) -> dict:
     created = _api().add_task(**body.model_dump())
 
     if is_spark_assignee(created.get("assignee_id")):
-        _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
+        _trigger_spark_assignment(created["id"])
 
     return created
 
@@ -204,7 +161,7 @@ def update_task(id: str, body: TaskUpdate) -> dict:
     updated = _api().update_task(id, **body.model_dump(exclude_unset=True))
 
     if not is_spark_assignee(before.get("assignee_id")) and is_spark_assignee(updated.get("assignee_id")):
-        _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
+        _trigger_spark_assignment(id)
 
     return updated
 
@@ -248,14 +205,13 @@ def add_comment(task_id: str, body: AddTaskCommentRequest) -> AddTaskCommentResp
     )
     user_comment = _to_task_activity_response(user_comment_row)
 
-    spark_comments_rows = []
     task = _api().get_task(task_id)
     if is_spark_assignee(task.get("assignee_id")):
-        _api().ensure_user(SPARK_USER_ID, name=SPARK_USER_NAME)
-        spark_comments_rows = _run_spark_sequence(task_id, build_comment_trigger(task_id, user_comment_row["id"], body.content))
+        _trigger_spark_comment(task_id, user_comment_row["id"], body.content)
 
-    spark_comments = [_to_task_activity_response(row) for row in spark_comments_rows]
-    return AddTaskCommentResponse(success=True, user_comment=user_comment, spark_comments=spark_comments)
+    # Spark now runs asynchronously in a separate process, so its reply is not
+    # available synchronously. Clients refetch /tasks/{id}/activities to pick it up.
+    return AddTaskCommentResponse(success=True, user_comment=user_comment, spark_comments=[])
 
 
 @app.get("/tasks/{task_id}/activities")

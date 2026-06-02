@@ -1,5 +1,5 @@
 import unittest
-from task_program.spark_service import _strip_markdown
+from spark_agent.service import _strip_markdown
 
 
 class TestMarkdownStripping(unittest.TestCase):

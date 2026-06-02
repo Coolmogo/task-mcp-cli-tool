@@ -3,10 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from task_program.spark_agent import SPARK_USER_ID, is_spark_assignee
-from task_program.schemas import SparkCreateTaskProposal, SparkTaskAction, TaskContext
-from task_program.spark_service import generate_spark_reply
-from task_program.settings import SparkSettings
+from task_program.agent_identity import SPARK_USER_ID, is_spark_assignee
+from spark_agent.schemas import SparkCreateTaskProposal, SparkTaskAction, TaskContext
+from spark_agent.service import generate_spark_reply
+from spark_agent.settings import SparkSettings
 from task_program import TaskCLIError
 from task_program.program import (
     _normalize_task_context_priority,
