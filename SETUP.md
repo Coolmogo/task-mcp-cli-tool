@@ -1,25 +1,30 @@
 # Setup
 
-Two setup tracks — one for the CLI tool, one for the MCP server. Both share the same prerequisites and Supabase schema, so do those once first.
+Two setup tracks — one for the CLI tool, one for the MCP server. Both share the same prerequisites and SurrealDB schema, so do those once first.
 
 ## Prerequisites (shared)
 
 - Python 3.10+
 - [pipx](https://pipx.pypa.io/stable/) — `python -m pip install --user pipx && python -m pipx ensurepath`
-- A Supabase project (free tier works). Grab its URL and either the anon key or the service-role key.
+- Access to a SurrealDB instance. This project uses a [Surreal Cloud](https://surrealdb.com/cloud) instance (namespace and database both `main`). Grab its connection URL (`wss://…surreal.cloud`) and the **root** username/password. [Surrealist](https://surrealist.app/) (the SurrealDB GUI) is handy for connecting and importing the schema.
 
-## Step 0 — Supabase schema + credentials (shared)
+## Step 0 — SurrealDB schema + credentials (shared)
 
-1. **Create the schema.** Open the **SQL Editor** in your Supabase dashboard and paste the contents of [`schema.sql`](./schema.sql). It's idempotent — re-run safely.
+1. **Create the schema.** Connect to your instance in **Surrealist**, select namespace/database `main`, open a new **query**, paste the contents of [`schema.surql`](./schema.surql), and **Run query**. Every statement uses `IF NOT EXISTS`, so it's safe to re-run. (Prefer the CLI? `surreal import --namespace main --database main schema.surql` does the same.) To wipe all records later while keeping the schema, run [`reset.surql`](./reset.surql) the same way.
 2. **Add credentials.** Copy the template and fill it in:
    ```bash
    cp .env.example .env
    ```
    ```dotenv
-   SUPABASE_URL=https://your-project.supabase.co
-   SUPABASE_KEY=your-anon-or-service-role-key
+   SURREALDB_URL=wss://your-instance.surreal.cloud
+   SURREALDB_USER=root
+   SURREALDB_PASS=your-root-password
+   SURREALDB_NS=main
+   SURREALDB_DB=main
    ```
-   The anon key works when RLS is off (the default — `schema.sql` disables RLS on both tables). Use the service-role key only if you've turned RLS on without writing policies.
+   The app signs in as root, so it has full access and no table permissions apply (the SurrealDB analog of "RLS off"). `SURREALDB_NS`/`SURREALDB_DB` default to `main` if omitted.
+
+For the full database-connection reference — URL schemes, finding the values in Surreal Cloud, a local-server alternative, and connection troubleshooting — see [`DB_SETUP.md`](./DB_SETUP.md).
 
 Done with the shared prep. Now pick a track below.
 
@@ -43,10 +48,10 @@ pipx install --editable .
 
 ```bash
 task --help
-task project list      # should print "No projects." or your existing list
+task task list      # should print "No tasks." or your existing list
 ```
 
-If you get `SUPABASE_URL and SUPABASE_KEY must be set`, the CLI couldn't find your `.env` — see A3.
+If you get `SURREALDB_URL, SURREALDB_USER and SURREALDB_PASS must be set`, the CLI couldn't find your `.env` — see A3.
 
 ### A3. (Optional) Make it work from outside the project tree
 
@@ -68,18 +73,17 @@ mkdir -p ~/.config/taskcli && cp .env ~/.config/taskcli/.env
 ### A4. Smoke test
 
 ```bash
-task project add --title "Test" --description "" \
-                 --start 2026-06-01 --end 2026-09-30 --stages 4
-task project list
-task project delete <id_from_above>
+task task add --title "Test" --description "" --status "To Do" --due 2026-06-15
+task task list
+task task delete <record_id_from_above>   # e.g. task:8f3k — copy it from the output
 ```
 
 See the README for the full command reference.
 
 ### A5. Troubleshooting
 
-- **`SUPABASE_URL and SUPABASE_KEY must be set`** — `.env` not found. Either run from inside the project tree or do A3.
-- **`42501 row-level security`** — you turned RLS on in Supabase without policies. Either turn it off for `projects`/`tasks` or switch to the service-role key.
+- **`SURREALDB_URL, SURREALDB_USER and SURREALDB_PASS must be set`** — `.env` not found. Either run from inside the project tree or do A3.
+- **Connection / authentication errors** — wrong `SURREALDB_URL`, or the root username/password don't match your instance. Confirm them against the connection Surrealist uses. Make sure you imported `schema.surql` into the `main`/`main` namespace/database.
 - **Edits don't take effect** — you used `pipx install .` (snapshot) instead of `pipx install --editable .`. Reinstall: `pipx install --force --editable .`.
 
 ---
@@ -164,13 +168,13 @@ If you already have other `mcpServers` entries, merge — don't replace.
 
 ### B5. Restart Claude Desktop and verify
 
-Fully quit Claude Desktop (tray icon → Quit on Windows, ⌘Q on macOS — not just close the window). Relaunch. In a new chat, click the tools icon (🔌 / hammer); you should see ten tools registered under the `task` server (`add_project`, `list_projects`, `add_task`, …).
+Fully quit Claude Desktop (tray icon → Quit on Windows, ⌘Q on macOS — not just close the window). Relaunch. In a new chat, click the tools icon (🔌 / hammer); you should see eight tools registered under the `task` server (`add_task`, `list_tasks`, `add_comment`, `list_activities`, …).
 
 Smoke tests inside Claude:
 
-- *"List my projects."* → calls `list_projects`.
-- *"Create a project titled 'Test' from 2026-06-01 to 2026-09-30 with 4 stages, blank description."* → calls `add_project`.
-- *"Show project 999999."* → returns `Error: Project #999999 not found` (no traceback).
+- *"List my tasks."* → calls `list_tasks`.
+- *"Create a task titled 'Test' due 2026-06-15 with status To Do."* → calls `add_task`.
+- *"Show task task:nope."* → returns `Error: Task #task:nope not found` (no traceback).
 
 ### B6. (Optional) Interactive inspector during development
 
@@ -187,6 +191,6 @@ Opens a browser UI listing all tools with their schemas and a form to invoke eac
   - macOS: `~/Library/Logs/Claude/mcp-server-task.log`
 - **`ModuleNotFoundError: No module named 'task_program'`** in the log — wrong Python in B4. Redo B2.
 - **`ModuleNotFoundError: No module named 'mcp'`** — you installed without the `[mcp]` extra. Redo B1.
-- **`SUPABASE_URL and SUPABASE_KEY must be set`** — `.env` missing at the fallback path. Redo B3.
+- **`SURREALDB_URL, SURREALDB_USER and SURREALDB_PASS must be set`** — `.env` missing at the fallback path. Redo B3.
 - **Server crashes silently on launch.** Run the B2 verify command manually — any stack trace prints to your terminal.
-- **Data looks stale.** CLI and MCP share the same Supabase tables; re-call `list_*` to refresh.
+- **Data looks stale.** CLI and MCP share the same SurrealDB instance; re-call `list_*` to refresh.

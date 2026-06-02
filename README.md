@@ -1,56 +1,77 @@
 # task
 
-A CLI + MCP server for managing **Projects** and the **Tasks** that belong to them, backed by Supabase Postgres. Built for [Coolmogo.ai](https://coolmogo.ai). 
+A CLI + MCP server for managing **Tasks** — each with an auto-recorded **activity history** and free-text **comments** — backed by SurrealDB. Built for [Coolmogo.ai](https://coolmogo.ai).
+
+> **Projects are shelved for now.** The projects table and all project code (dataclass, `TaskCLI` methods, CLI parser, MCP tools) remain in the repo as dead code to reintroduce later, but they are not wired into the active CLI/MCP surface. Tasks carry an optional `project_id`/`stage_id` but no project commands are exposed.
 
 ---
 
 ## 1. Project overview
 
-The repo is split into one execution layer and two clients that wrap it:
+The repo is split into one execution layer and three clients that wrap it:
 
-- **`task_program/`** — execution layer. `TaskCLI` class + Supabase access. No CLI or MCP code.
+- **`task_program/`** — execution layer. `TaskCLI` class + SurrealDB access. No CLI, MCP, or HTTP code.
 - **`task_cli/`** — CLI client. Imports `TaskCLI` from `task_program`.
 - **`task_mcp/`** — MCP server client. Imports `TaskCLI` from `task_program`.
+- **`task_api/`** — FastAPI REST client. Imports `TaskCLI` from `task_program`.
 
-`task_cli` and `task_mcp` are peers; adding another consumer (web service, scripts) means a new sibling package, not changes to `task_program`.
+`task_cli`, `task_mcp`, and `task_api` are peers; adding another consumer means a new sibling package, not changes to `task_program`.
 
 ```mermaid
 flowchart LR
     shell["shell<br/><code>task ...</code>"] --> cli["task_cli"]
     claude["Claude Desktop"] -- MCP/stdio --> mcp["task_mcp"]
-    other["other Python"] --> api
+    http["HTTP / Postman"] --> rest["task_api"]
     cli --> api["task_program<br/><b>TaskCLI</b>"]
     mcp --> api
-    api --> supabase[("Supabase Postgres")]
+    rest --> api
+    api --> surreal[("SurrealDB<br/>(Surreal Cloud)")]
 ```
 
-**Data model** — two tables (`projects`, `tasks`) and one `task_status` enum (`todo` / `in_progress` / `done`). Full DDL in [`schema.sql`](./schema.sql) — idempotent, paste into the Supabase SQL editor.
+**Data model** — `task` plus `activity` (auto-recorded history) and `comment`, with a `user` table referenced by `assignee`/`author` record links. `status` is free text (default `'To Do'`). Record ids are SurrealDB strings (e.g. `task:8f3k`), **not** auto-increment integers. Full schema for fresh installs in [`schema.surql`](./schema.surql); wipe all records (keeping the schema) with [`reset.surql`](./reset.surql). Import either by pasting into the Surrealist query editor (→ Run query) or via `surreal import`.
+
+SurrealDB tables are singular (`task`, `activity`, `comment`, `user`) and ids are
+string record ids. The execution layer normalizes the DB link fields (`assignee`,
+`task`, `author`) into the `*_id` string keys shown in the API/CLI output.
 
 ```mermaid
 erDiagram
-    projects ||--o{ tasks : "has"
-    projects {
-        int8 id PK
-        text title
-        text description
-        date start_date
-        date end_date
-        int4 no_of_stages
+    user ||--o{ task : "assignee (dead)"
+    task ||--o{ activity : "has"
+    task ||--o{ comment : "has"
+    task {
+        string id PK "e.g. task:8f3k"
+        string title
+        string description
+        string status
+        string due_date "YYYY-MM-DD"
+        record assignee FK "dead, null"
+        string stage_id
+        record project FK "shelved, null"
+        datetime created_at
     }
-    tasks {
-        int8 id PK
-        int8 project_id FK
-        text title
-        text description
-        task_status status
-        text assigned_to
-        int4 stage
-        date start_date
-        date end_date
+    activity {
+        string id PK
+        record task FK
+        string type "history|comment"
+        string action "updated|removed|assigned|moved|commented"
+        string field
+        string old_value
+        string new_value
+        string text
+        record author FK "dead, null"
+        datetime created_at
+    }
+    comment {
+        string id PK
+        record task FK
+        string text
+        record author FK "dead, null"
+        datetime created_at
     }
 ```
 
-**Credentials** — copy `.env.example` to `.env` and fill in `SUPABASE_URL` and `SUPABASE_KEY`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat).
+**Credentials** — copy `.env.example` to `.env` and fill in `SURREALDB_URL`, `SURREALDB_USER` (root), and `SURREALDB_PASS`; `SURREALDB_NS`/`SURREALDB_DB` default to `main`. `task_program/db.py` walks up from cwd to find it, then falls back to `~/.config/taskcli/.env` (legacy folder name, kept for back-compat). See [`DB_SETUP.md`](./DB_SETUP.md) for connecting to SurrealDB (URL schemes, getting the values, importing the schema, troubleshooting).
 
 **Setup** — see [`SETUP.md`](./SETUP.md) for step-by-step install instructions (one track for the CLI, one for the MCP server).
 
@@ -58,83 +79,172 @@ erDiagram
 
 ## 2. Execution layer (`task_program/`)
 
-`task_program/api.py` defines:
+`task_program/program.py` defines:
 
 - `TaskCLIError(Exception)` — raised on validation or not-found failures.
-- `TaskCLI` — one method per CRUD verb:
-  - Projects: `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
+- `TaskCLI` — one method per verb:
   - Tasks: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`
+  - Comments: `add_comment`, `list_comments`
+  - Activities: `list_activities`
+  - Projects (dead, kept for later): `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`
 
-All methods return raw row dicts (or `list[dict]`). Date arguments accept either `datetime.date` or ISO strings (`"2026-06-01"`). `status` is a plain string matching the enum.
+All methods return raw row dicts (or `list[dict]`). `due` accepts either `datetime.date` or an ISO string (`"2026-06-01"`); `status` is any string (default `'To Do'`).
 
-Validation centralized in `TaskCLI`: `end_date >= start_date`, `stages >= 1`, `1 <= stage <= project.no_of_stages`, project/task existence on lookups, and "at least one field" on updates. The stage upper bound is enforced in code rather than SQL because Postgres `CHECK` can't reference another table without a trigger.
+`update_task` **auto-records history**: it diffs the current row against your update and writes one `activities` row per changed field (`action` = `updated`/`assigned`/`moved`, or `removed` when a field is cleared). `get_task` returns the task with embedded `activities` and `comments` lists. Validation is minimal now: task existence on lookups and "at least one field" on updates.
 
 ```python
 from task_program import TaskCLI, TaskCLIError
 
-api = TaskCLI()  # or TaskCLI(supabase_url=..., supabase_key=...)
+api = TaskCLI()  # or TaskCLI(url=..., username=..., password=..., namespace="main", database="main")
 
-p = api.add_project(title="Launch v1", description="Q3", start="2026-06-01",
-                    end="2026-09-30", stages=4)
-t = api.add_task(project=p["id"], title="Wireframes", description="",
-                 status="todo", assigned_to="Aarav", stage=1,
-                 start="2026-06-01", end="2026-06-15")
-api.update_task(t["id"], status="in_progress")
+t = api.add_task(title="Wireframes", description="first cut",
+                 status="To Do", due="2026-06-15")
+api.update_task(t["id"], status="In Progress")   # logs a 'moved' activity; t["id"] is e.g. "task:8f3k"
+api.add_comment(t["id"], "kickoff call done")
+
+full = api.get_task(t["id"])
+print(full["status"], len(full["activities"]), len(full["comments"]))
 
 try:
-    api.get_project(999)
+    api.get_task("task:doesnotexist")
 except TaskCLIError as e:
-    print(e)  # "Project #999 not found"
+    print(e)  # "Task #task:doesnotexist not found"
 ```
 
-Supabase client is `lru_cache`d in `task_program/db.py` — built once per process. No ORM, no repository layer.
+The SurrealDB client is `lru_cache`d in `task_program/db.py` — connected and signed in once per process. No ORM, no repository layer.
 
 ---
 
 ## 3. CLI tool (`task_cli/`)
 
-The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `project|task` → `add|list|show|update|delete`.
+The `task` command (or `python -m task_cli`) dispatches **entity → verb**: `task` → `add|list|show|update|delete`, plus `comment` → `add|list` and `activity` → `list`.
 
 ```bash
-# projects
-task project add --title "Launch v1" --description "Q3" \
-                 --start 2026-06-01 --end 2026-09-30 --stages 4
-task project list
-task project show 1
-task project update 1 --description "Pushed to Q4" --end 2026-12-15
-task project delete 1                                    # cascades to tasks
-
 # tasks
-task task add --project 1 --title "Wireframes" --description "" \
-              --status todo --assigned-to "Aarav" --stage 1 \
-              --start 2026-06-01 --end 2026-06-15
+task task add --title "Wireframes" --description "first cut" \
+              --status "To Do" --due 2026-06-15 --stage-id backlog
 task task list                                           # all
-task task list --project 1 --status in_progress          # filter
-task task show 1
-task task update 1 --status in_progress --assigned-to "Sam"
-task task delete 1
+task task list --status "In Progress"                    # filter by status
+task task show task:8f3k                                 # task + activity + comments
+task task update task:8f3k --status "In Progress"        # logs a history entry
+task task delete task:8f3k                               # cascades to activity/comments
+
+# comments
+task comment add --task task:8f3k --text "kickoff call done"
+task comment list --task task:8f3k
+
+# activity history (auto-recorded on task updates)
+task activity list --task task:8f3k
 ```
 
-**Required flags** — `project add`: `--title --start --end --stages`. `task add`: `--project --title --stage --start --end`. Everything else has a default.
+Ids are SurrealDB record ids (e.g. `task:8f3k`) — copy them from the `task add` / `task list` output; they are no longer auto-increment integers.
+
+**Required flags** — `task add`: `--title` only (everything else has a default). `comment add`: `--task --text`. `comment list` / `activity list`: `--task`. `--status` is free text (default `To Do`); `--assignee` takes a user record id but is non-functional until users are reintroduced.
 
 **Errors** print as one clean line, no traceback (`task_cli/commands/*.py` catches `TaskCLIError` and calls `sys.exit(str(e))`):
 
 | Input | Result |
 |---|---|
-| `--end` before `--start` | `end date must be on or after start date` |
-| `--stage 99` on a 4-stage project | `Stage must be 1..4 for project #N` |
-| `--project 999` (nonexistent) | `Project #999 not found` |
+| `task show task:nope` (nonexistent) | `Task #task:nope not found` |
+| `comment add --task task:nope ...` | `Task #task:nope not found` |
 | `update` with no fields | `Nothing to update. Provide at least one field.` |
-| Missing creds | `SUPABASE_URL and SUPABASE_KEY must be set` |
+| Missing creds | `SURREALDB_URL, SURREALDB_USER and SURREALDB_PASS must be set` |
 
 ---
 
 ## 4. MCP server (`task_mcp/`)
 
-`task_mcp/server.py` registers one MCP tool per `TaskCLI` method, with the same names as the methods (`add_project`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
+`task_mcp/server.py` registers one MCP tool per active `TaskCLI` method, with the same names as the methods (`add_task`, `list_tasks`, …). `TaskCLIError` is returned as `f"Error: {e}"` instead of raised — Claude sees a structured string, never a traceback.
 
-Tools exposed: `add_project`, `list_projects`, `get_project`, `update_project`, `delete_project`, `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`. Dates are ISO strings (`"YYYY-MM-DD"`); `status` is `"todo"`, `"in_progress"`, or `"done"`.
+Tools exposed: `add_task`, `list_tasks`, `get_task`, `update_task`, `delete_task`, `add_comment`, `list_comments`, `list_activities`. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). The `*_project` tools exist in the file but their `@mcp.tool()` decorators are commented out, so they are not exposed.
 
-Once configured in Claude Desktop, plain-English requests like *"list my projects"* or *"create a task in project 3 called Wireframes"* are routed to the matching tool.
+Once configured in Claude Desktop, plain-English requests like *"list my in-progress tasks"* or *"add a comment to that task saying the design is approved"* are routed to the matching tool. Task ids are record-id strings (e.g. `task:8f3k`), which Claude carries between tool calls.
 
 **Setup** — see [`SETUP.md`](./SETUP.md) Track B for Claude Desktop wiring (install with the `[mcp]` extra, `.env` placement, `claude_desktop_config.json` entry, troubleshooting).
+
+---
+
+## 5. REST API (`task_api/`)
+
+`task_api/server.py` is a barebones [FastAPI](https://fastapi.tiangolo.com/) app — one route per active `TaskCLI` method. It's a peer of the CLI and MCP clients. `TaskCLIError` is translated to an HTTP error by a single exception handler: lookups that miss return **404**, validation failures return **400**, both with a `{"detail": "..."}` body. There is no auth. Locally it binds to `127.0.0.1` (loopback-only) for single-user use, matching the single-user, root-access design (the SurrealDB connection signs in as root, so no table permissions apply). When a `$PORT` env var is set — as hosting platforms like Render do — it instead binds `0.0.0.0:$PORT` so the platform's health check can reach it; `HOST` can override the host explicitly.
+
+> **Deploying publicly?** The API has no authentication and talks to SurrealDB with root credentials, so a public `0.0.0.0` deploy exposes full read/write to anyone who can reach it. Put it behind an auth layer / network restriction, or keep it private, before exposing it to the internet.
+
+**Install & run:**
+
+```bash
+pip install -e ".[api]"     # adds fastapi + uvicorn + OpenAI API deps
+python -m task_api          # serves on http://127.0.0.1:8000
+```
+
+Interactive Swagger docs are at `http://127.0.0.1:8000/docs`.
+
+**Endpoints:**
+
+| Method & path                        | Action                                              |
+|--------------------------------------|-----------------------------------------------------|
+| `POST   /tasks`                      | Create a task (JSON body)                           |
+| `GET    /tasks?status=&project=`     | List tasks, optional `status`/`project` filters     |
+| `GET    /tasks/{id}`                 | Fetch one task with embedded `activities`+`comments`|
+| `PATCH  /tasks/{id}`                 | Update sent fields only (auto-logs history)         |
+| `DELETE /tasks/{id}`                 | Delete a task (history + comments cascade)          |
+| `POST   /tasks/{task_id}/comments`   | Add a comment and optionally trigger Spark          |
+| `GET    /tasks/{task_id}/comments`   | List a task's comments, oldest first                |
+| `GET    /tasks/{task_id}/activities` | List a task's activity history, oldest first        |
+
+Write endpoints take a JSON body. `POST /tasks/{task_id}/comments` now expects `{"content": "..."}` and triggers Spark only when the task is currently assigned to Spark. Assigning a task to `user:spark` also triggers Spark's first turn. `due` is an ISO string (`"YYYY-MM-DD"`); `status` is free text (default `"To Do"`). On `PATCH`, only the fields present in the body change — omitted fields are left untouched.
+
+**Examples — curl (run in a terminal):**
+
+```bash
+# create
+curl -X POST http://127.0.0.1:8000/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Write report", "status": "In Progress", "due": "2026-06-01"}'
+
+# update one field (records a history entry); the id is the record id from the create response
+curl -X PATCH http://127.0.0.1:8000/tasks/task:8f3k \
+  -H "Content-Type: application/json" \
+  -d '{"status": "Done"}'
+
+# fetch with embedded activities + comments
+curl http://127.0.0.1:8000/tasks/task:8f3k
+
+# add a comment
+curl -X POST http://127.0.0.1:8000/tasks/task:8f3k/comments \
+  -H "Content-Type: application/json" \
+  -d '{"content": "design approved"}'
+```
+
+> **Record-id paths.** Task ids are SurrealDB strings like `task:8f3k`, returned by `POST /tasks`. They contain a colon; in a URL path that's fine as-is, but if your HTTP client encodes it, `%3A` also works (`/tasks/task%3A8f3k`).
+
+**Using Postman (or any GUI client):** the `curl` lines above are *shell commands* — don't paste a whole `curl …` line into the URL bar, or the `-H`/`-d`/`\` get treated as part of the path and you'll get `404 {"detail": "Not Found"}`. Instead set the request up by hand:
+
+1. **Method** — e.g. `POST`.
+2. **URL** — just the endpoint, e.g. `http://127.0.0.1:8000/tasks` (for `PATCH`/`GET` on one task, append the record id: `http://127.0.0.1:8000/tasks/task:8f3k`).
+3. **Body** — select **raw**, then **JSON** in the type dropdown (this sets `Content-Type: application/json` for you), and paste only the JSON object:
+   ```json
+   {"title": "Write report", "status": "In Progress", "due": "2026-06-01"}
+   ```
+4. **Send** — a successful create returns `201` with the new task (including its `id`).
+
+Shortcut: Postman's **Import** button accepts a pasted `curl …` command and fills in the method, URL, headers, and body automatically.
+
+### Spark MVP note
+
+Spark is the AI agent. It lives in its own `spark_agent/` package and runs **out of process**: when a task is assigned to `user:spark` (or a comment lands on a Spark-assigned task), the server launches `python -m spark_agent <task_id>` fire-and-forget. Spark connects back over MCP (`task_mcp`) to read the task and post its reply, so the reply appears a moment *after* your request returns — refetch the activity feed to see it.
+
+1. Set `OPENROUTER_API_KEY` (and optionally `OPENROUTER_MODEL`) in the backend environment or `.env`.
+2. Install the extras: `pip install -e ".[api,mcp,spark]"` (the API server, the MCP server Spark talks to, and Spark itself).
+3. Start the API with `python -m task_api`.
+4. Assign the task to Spark with `{"assignee_id": "user:spark"}` on `PATCH /tasks/{task_id}`.
+5. POST to `/tasks/{task_id}/comments` with:
+
+```json
+{"content": "Summarize this task"}
+```
+
+6. The response returns your comment immediately with `spark_comments: []` (Spark is async).
+7. After a moment, `GET /tasks/{task_id}/activities` shows Spark's reply (a comment or a proposal).
+
+To run a Spark turn directly (no server needed), call it yourself: `python -m spark_agent <task_id> --trigger assignment`.

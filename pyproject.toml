@@ -5,18 +5,30 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "task"
 version = "0.1.0"
-description = "CLI + MCP clients over a shared task_program execution layer, backed by Supabase"
+description = "CLI + MCP clients over a shared task_program execution layer, backed by SurrealDB"
 requires-python = ">=3.10"
 dependencies = [
-  "supabase>=2.0",
+  "surrealdb>=2.0",
   "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]>=1.0"]
+mcp = [
+  "mcp[cli]>=1.0",
+]
+api = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+]
+spark = [
+  "mcp[cli]>=1.0",
+  "pydantic-ai[google]>=0.1.0",
+  "ddgs>=4.0",
+  "pydantic-settings>=2.2",
+]
 
 [project.scripts]
 task = "task_cli.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["task_program*", "task_cli*", "task_mcp*"]
+include = ["task_program*", "task_cli*", "task_mcp*", "task_api*", "spark_agent*"]
